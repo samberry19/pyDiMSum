@@ -64,9 +64,10 @@ class RunConfig:
     experiment_design_path: Path
     """Path to the tab-separated experimental design file."""
 
-    wildtype_sequence: str
+    wildtype_sequence: str = ""
     """WT nucleotide sequence (A/C/G/T upper-case = variable,
-    lower-case = internal constant region to remove)."""
+    lower-case = internal constant region to remove).
+    Required in mutation mode; optional (defaults to "") in enrichment_mode."""
 
     # ---- Input / output ----
     output_path: Path = field(default_factory=lambda: Path("."))
@@ -116,6 +117,20 @@ class RunConfig:
 
     # ---- Synonym sequences ----
     synonym_sequence_path: Path | None = None
+
+    # ---- Enrichment / library mode ----
+    enrichment_mode: bool = False
+    """If True, bypass all mutation-centric filters and compute per-sequence
+    log(out/in) enrichment.  Wildtype sequence is not required."""
+    enrichment_normalise: str = "median"
+    """Normalisation strategy for enrichment mode.
+    One of: none | median | total | reference | spikein."""
+    enrichment_reference_id: str | None = None
+    """nt_seq string of the reference sequence (required when
+    enrichment_normalise == 'reference')."""
+    enrichment_spikein_ids: str | None = None
+    """Comma-separated nt_seq strings for spike-in sequences
+    (used when enrichment_normalise == 'spikein')."""
 
     # ---- Bayesian doubles (disabled / stub) ----
     bayesian_double_fitness: bool = False
@@ -172,9 +187,12 @@ class RunConfig:
     def _validate(self) -> None:
         """Run all validation checks and populate derived fields."""
         self._validate_paths()
-        self._validate_wt_sequence()
-        self._validate_sequence_type()
-        self._validate_permitted_sequences()
+        if self.enrichment_mode:
+            self._validate_enrichment_mode()
+        else:
+            self._validate_wt_sequence()
+            self._validate_sequence_type()
+            self._validate_permitted_sequences()
         self._validate_indels()
         self._validate_count_thresholds()
         self._validate_misc()
@@ -200,7 +218,7 @@ class RunConfig:
                 )
 
     def _validate_wt_sequence(self) -> None:
-        if not self.wildtype_sequence:
+        if not self.wildtype_sequence and not self.enrichment_mode:
             raise ValueError("wildtypeSequence is required")
         if not set(self.wildtype_sequence).issubset(_NT_MIXED):
             invalid = set(self.wildtype_sequence) - _NT_MIXED
@@ -214,6 +232,31 @@ class RunConfig:
         self._wt_seq_variable = "".join(
             b for b in self.wildtype_sequence if b in _NT_UPPER
         )
+
+    def _validate_enrichment_mode(self) -> None:
+        """Validate enrichment-mode-specific config and set derived fields."""
+        _VALID_NORM = {"none", "median", "total", "reference", "spikein"}
+        if self.enrichment_normalise not in _VALID_NORM:
+            raise ValueError(
+                f"enrichment_normalise must be one of {_VALID_NORM}, "
+                f"got {self.enrichment_normalise!r}"
+            )
+        if self.enrichment_normalise == "reference" and not self.enrichment_reference_id:
+            raise ValueError(
+                "enrichment_reference_id is required when "
+                "enrichment_normalise == 'reference'"
+            )
+        # Sequence type: resolve without attempting WT translation
+        if self.sequence_type == "auto":
+            # Default to noncoding in enrichment mode (no single WT to probe)
+            self._sequence_type_resolved = "noncoding"
+        else:
+            self._sequence_type_resolved = self.sequence_type
+        # WT fields left empty — not needed
+        self._wt_seq_upper = ""
+        self._wt_seq_variable = ""
+        # permitted_sequences not meaningful in enrichment mode
+        self.permitted_sequences = None
 
     def _validate_sequence_type(self) -> None:
         if self.sequence_type not in ("auto", "coding", "noncoding"):

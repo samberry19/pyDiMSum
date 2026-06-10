@@ -30,11 +30,16 @@ from pydimsum.steam.fitness import (
     filter_low_counts,
     normalise_fitness_by_generations,
 )
+from pydimsum.steam.library import (
+    calculate_enrichment,
+    process_library_variants,
+    write_enrichment_outputs,
+)
 from pydimsum.steam.merge import build_variant_table
 from pydimsum.steam.merge_fitness import merge_fitness
 from pydimsum.steam.mutations import identify_doubles, identify_singles
 from pydimsum.steam.process_variants import process_variants
-from pydimsum.steam.error_model import fit_error_model
+from pydimsum.steam.error_model import fit_error_model, _fit_normalisation
 
 logger = logging.getLogger(__name__)
 
@@ -66,8 +71,9 @@ def run_pipeline(config: RunConfig) -> None:
 
     logger.info("Replicates: %s", replicates)
 
-    # Require >= 2 replicates for normalisation and error model
-    if len(replicates) < 2:
+    # Require >= 2 replicates for normalisation and error model (mutation mode)
+    # In enrichment mode, <2 replicates just disables the optional scale/shift step.
+    if len(replicates) < 2 and not config.enrichment_mode:
         logger.warning(
             "Only %d replicate(s) found. "
             "Disabling fitness normalisation and error model.",
@@ -155,6 +161,127 @@ def _run_wrap(
             return
 
 
+def _run_enrichment_steam(
+    config: RunConfig,
+    exp_design: ExperimentDesign,
+    replicates: list[int],
+) -> None:
+    """Execute stages 4–5 in enrichment (library) mode.
+
+    Sequence-agnostic: no WT assumption, no Hamming/substitution filters.
+    Produces enrichment_variant_data.txt + Parquet bundle.
+    """
+    logger.info("=== Enrichment mode ===")
+
+    # Stage 4: Build count table + annotate
+    if config.start_stage <= 4 <= config.stop_stage:
+        logger.info("--- Stage 4 (enrichment): load and annotate library ---")
+        variant_df = build_variant_table(config, exp_design)
+        lib_df = process_library_variants(variant_df, config)
+        logger.info("Library variants: %d sequences", len(lib_df))
+
+        _write_tsv(lib_df, config.project_path / f"{config.project_name}_library_variant_data.tsv")
+    else:
+        raise NotImplementedError("Resuming enrichment from stage 5 without stage 4 not yet supported.")
+
+    if config.stop_stage < 5:
+        return
+
+    # Stage 5: Calculate enrichment
+    logger.info("--- Stage 5 (enrichment): calculate enrichment scores ---")
+
+    # Filter low counts (reuses mutation-path helper; Nham_nt=0 means only
+    # integer thresholds apply — editdist:threshold form is unsupported in
+    # enrichment mode and guarded in config validation)
+    lib_df = filter_low_counts(lib_df, config, replicates)
+    lib_df = lib_df.with_columns(pl.lit(True).alias("error_model"))
+
+    # Dropout pseudocounts
+    lib_df = add_dropout_pseudocount(lib_df, config, replicates)
+
+    # Optional replicate scale/shift normalisation (≥2 replicates only)
+    norm_model_df: pl.DataFrame | None = None
+    if len(replicates) >= 2:
+        try:
+            # Build a temporary enrichment table for fitting (no WT filtering)
+            work_for_norm = lib_df
+            # Add has_all flag (needed by _fit_normalisation)
+            has_all_expr = pl.lit(True)
+            for E in replicates:
+                has_all_expr = has_all_expr & (
+                    pl.col(f"count_e{E}_s0") > 0
+                ) & (
+                    pl.col(f"count_e{E}_s1") > 0
+                )
+            work_for_norm = work_for_norm.with_columns(has_all_expr.alias("all_reads"))
+
+            # Compute raw fitness for each replicate (for normalisation fitting)
+            for E in replicates:
+                s0 = f"count_e{E}_s0"
+                s1 = f"count_e{E}_s1"
+                work_for_norm = work_for_norm.with_columns(
+                    pl.when(
+                        (pl.col(s0) > 0) & (pl.col(s1) > 0)
+                    ).then(
+                        (pl.col(s1).cast(pl.Float64) / pl.col(s0).cast(pl.Float64)).log()
+                    ).otherwise(None)
+                    .alias(f"fitness{E}")
+                )
+
+            # Mark above-threshold (1st percentile — reuse same logic)
+            import numpy as np
+            fitness_cols = [f"fitness{E}" for E in replicates]
+            above_threshold_data = work_for_norm.filter(pl.col("all_reads"))
+            flat_fitness = np.concatenate([
+                above_threshold_data[fc].drop_nulls().to_numpy()
+                for fc in fitness_cols
+            ])
+            if len(flat_fitness) > 0:
+                input_count_threshold = float(np.exp(-np.percentile(flat_fitness, 1)))
+                above_thresh_expr = pl.lit(True)
+                for E in replicates:
+                    above_thresh_expr = above_thresh_expr & (
+                        pl.col(f"count_e{E}_s0").cast(pl.Float64) > input_count_threshold
+                    )
+                work_for_norm = work_for_norm.with_columns(
+                    above_thresh_expr.alias("input_above_threshold")
+                )
+                norm_model_df = _fit_normalisation(work_for_norm, replicates)
+                logger.info("Replicate normalisation model: %s", norm_model_df.to_dict(as_series=False))
+            else:
+                logger.warning("No sequences with reads in all replicates — skipping normalisation fit.")
+        except Exception as exc:
+            logger.warning("Replicate normalisation failed (%s) — using identity.", exc)
+            norm_model_df = None
+
+    lib_df = calculate_enrichment(lib_df, config, replicates, norm_model_df)
+
+    # Optional generation normalisation
+    gen_check = exp_design.df.filter(pl.col("selection_id") == 1)["generations"].drop_nulls()
+    has_generations = len(gen_check) == len(exp_design.df.filter(pl.col("selection_id") == 1))
+    if has_generations:
+        logger.info("Normalising enrichment by number of generations...")
+        # normalise_fitness_by_generations operates on fitness{E}_uncorr columns;
+        # our columns are enrichment{E}_uncorr — rename, normalise, rename back
+        rename_to = {f"enrichment{E}_uncorr": f"fitness{E}_uncorr" for E in replicates}
+        rename_back = {v: k for k, v in rename_to.items()}
+        lib_df = lib_df.rename(rename_to)
+        lib_df = normalise_fitness_by_generations(
+            lib_df, exp_design.df, replicates, fitness_suffix="_uncorr"
+        )
+        lib_df = lib_df.rename(rename_back)
+
+    # Save normalisation model if fitted
+    if norm_model_df is not None:
+        norm_model_df.write_csv(
+            str(config.tmp_path / "normalisationmodel_enrichment.txt"), separator="\t"
+        )
+
+    write_enrichment_outputs(lib_df, replicates, config)
+    logger.info("=== pyDiMSum enrichment pipeline complete ===")
+    logger.info("Output files written to: %s", config.project_path)
+
+
 def _load_barcode_design(config: RunConfig) -> "pl.DataFrame | None":
     """Load barcode design file if specified, else return None."""
     if config.barcode_design_path is None:
@@ -172,6 +299,13 @@ def _run_steam(
     synonym_sequences: list[str] | None,
 ) -> None:
     """Execute STEAM stages 4 and 5."""
+
+    # ============================================================
+    # Enrichment mode: bypass mutation-centric processing
+    # ============================================================
+    if config.enrichment_mode:
+        _run_enrichment_steam(config, exp_design, replicates)
+        return
 
     # ============================================================
     # Stage 4: Build and process variant table

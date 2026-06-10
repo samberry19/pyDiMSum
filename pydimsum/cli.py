@@ -40,10 +40,13 @@ def main(
         "--experiment_design_path", "--experimentDesignPath",
         help="Path to tab-separated experimental design file.",
     ),
-    wildtype_sequence: str = typer.Option(
-        ...,
+    wildtype_sequence: Optional[str] = typer.Option(
+        None,
         "--wildtype_sequence", "--wildtypeSequence",
-        help="WT nucleotide sequence. Upper-case = variable, lower-case = constant region.",
+        help=(
+            "WT nucleotide sequence. Upper-case = variable, lower-case = constant region. "
+            "Required in mutation mode; optional when --enrichment_mode is set."
+        ),
     ),
     # ---- Input / output ----
     output_path: Path = typer.Option(
@@ -88,6 +91,27 @@ def main(
     barcode_identity_path: Optional[Path] = typer.Option(None, "--barcode_identity_path", "--barcodeIdentityPath"),
     # ---- Synonym sequences ----
     synonym_sequence_path: Optional[Path] = typer.Option(None, "--synonym_sequence_path", "--synonymSequencePath"),
+    # ---- Enrichment / library mode ----
+    enrichment_mode: bool = typer.Option(
+        False, "--enrichment_mode/--no_enrichment_mode", "--enrichmentMode",
+        help=(
+            "Enrichment mode: bypass mutation-centric filters and compute "
+            "per-sequence log(out/in) enrichment. "
+            "--wildtype_sequence is not required in this mode."
+        ),
+    ),
+    enrichment_normalise: str = typer.Option(
+        "median", "--enrichment_normalise", "--enrichmentNormalise",
+        help="Enrichment normalisation strategy: none | median | total | reference | spikein.",
+    ),
+    enrichment_reference_id: Optional[str] = typer.Option(
+        None, "--enrichment_reference_id", "--enrichmentReferenceId",
+        help="nt_seq string of the reference sequence (required when enrichment_normalise=reference).",
+    ),
+    enrichment_spikein_ids: Optional[str] = typer.Option(
+        None, "--enrichment_spikein_ids", "--enrichmentSpikeInIds",
+        help="Comma-separated nt_seq strings for spike-in sequences (enrichment_normalise=spikein).",
+    ),
     # ---- Misc ----
     verbose: bool = typer.Option(False, "--verbose", "-v"),
     version: bool = typer.Option(False, "--version", callback=None, is_eager=True),
@@ -102,10 +126,18 @@ def main(
     from pydimsum.config import RunConfig
     from pydimsum.pipeline import run_pipeline
 
+    # wildtype_sequence is required in mutation mode; optional in enrichment mode
+    if wildtype_sequence is None and not enrichment_mode:
+        typer.echo(
+            "Configuration error: --wildtype_sequence is required unless --enrichment_mode is set.",
+            err=True,
+        )
+        raise typer.Exit(code=1)
+
     try:
         config = RunConfig(
             experiment_design_path=experiment_design_path,
-            wildtype_sequence=wildtype_sequence,
+            wildtype_sequence=wildtype_sequence or "",
             output_path=output_path,
             project_name=project_name,
             count_path=count_path,
@@ -132,6 +164,10 @@ def main(
             barcode_error_rate=barcode_error_rate,
             barcode_identity_path=barcode_identity_path,
             synonym_sequence_path=synonym_sequence_path,
+            enrichment_mode=enrichment_mode,
+            enrichment_normalise=enrichment_normalise,
+            enrichment_reference_id=enrichment_reference_id,
+            enrichment_spikein_ids=enrichment_spikein_ids,
         )
     except (ValueError, FileNotFoundError) as exc:
         typer.echo(f"Configuration error: {exc}", err=True)
