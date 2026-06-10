@@ -1,0 +1,31 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "pydimsum"
+version = "0.1.0"
+description = "Python reimplementation of DiMSum: deep mutational scanning analysis pipeline"
+readme = "README.md"
+requires-python = ">=3.11"
+license = { text = "MIT" }
+dependencies = [
+    "polars>=0.20",
+    "numpy>=1.26",
+    "scipy>=1.11",
+    "biopython>=1.81",
+    "pyarrow>=14",        # Polars Parquet backend
+    "typer>=0.9",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=7",
+    "pytest-cov",
+]
+
+[project.scripts]
+pydimsum = "pydimsum.cli:app"
+
+[tool.hatch.build.targets.wheel]
+packages = ["pydimsum"]
