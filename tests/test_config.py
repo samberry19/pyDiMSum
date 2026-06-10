@@ -82,3 +82,65 @@ def test_wt_variable_seq():
     """Variable sequence should only have upper-case bases."""
     cfg = make_config()
     assert cfg.wt_variable_seq == WT_SEQ  # all upper → no constant regions in demo WT
+
+
+# ---------------------------------------------------------------------------
+# ExperimentDesign tests
+# ---------------------------------------------------------------------------
+
+class TestExperimentDesign:
+    def _write_design(self, path: Path, extra_col: str = "") -> Path:
+        """Write a minimal valid TSV design file."""
+        header = "sample_name\texperiment_replicate\tselection_id\tpair1\tpair2"
+        if extra_col:
+            header += f"\t{extra_col}"
+        rows = [
+            "input1\t1\t0\tread1_A.fastq.gz\tread2_A.fastq.gz",
+            "output1\t1\t1\tread1_B.fastq.gz\tread2_B.fastq.gz",
+        ]
+        if extra_col:
+            rows = [r + "\tval" for r in rows]
+        tsv = "\n".join([header] + rows) + "\n"
+        design = path / "design.tsv"
+        design.write_text(tsv)
+        return design
+
+    def test_fastq_file_dir_overrides_pair_directory(self, tmp_path):
+        from pydimsum.io.designs import ExperimentDesign
+        design = self._write_design(tmp_path)
+        exp = ExperimentDesign(design, fastq_file_dir=Path("/data/fastq"))
+        assert "pair_directory" in exp.df.columns
+        dirs = exp.df["pair_directory"].to_list()
+        assert all(d == "/data/fastq" for d in dirs)
+
+    def test_no_fastq_file_dir_no_pair_directory_added(self, tmp_path):
+        from pydimsum.io.designs import ExperimentDesign
+        design = self._write_design(tmp_path)
+        exp = ExperimentDesign(design)
+        # pair_directory not added if not in file and fastq_file_dir not given
+        if "pair_directory" in exp.df.columns:
+            assert exp.df["pair_directory"].is_null().all()
+
+    def test_duplicate_pairs_raises(self, tmp_path):
+        from pydimsum.io.designs import ExperimentDesign
+        header = "sample_name\texperiment_replicate\tselection_id\tpair1\tpair2"
+        rows = [
+            "input1\t1\t0\tread1_A.fastq.gz\tread2_A.fastq.gz",
+            "input2\t2\t0\tread1_A.fastq.gz\tread2_A.fastq.gz",  # duplicate pair
+        ]
+        design = tmp_path / "dup.tsv"
+        design.write_text("\n".join([header] + rows))
+        with pytest.raises(ValueError, match="Duplicate"):
+            ExperimentDesign(design)
+
+    def test_duplicate_pairs_allowed_with_flag(self, tmp_path):
+        from pydimsum.io.designs import ExperimentDesign
+        header = "sample_name\texperiment_replicate\tselection_id\tpair1\tpair2"
+        rows = [
+            "input1\t1\t0\tread1_A.fastq.gz\tread2_A.fastq.gz",
+            "input2\t2\t0\tread1_A.fastq.gz\tread2_A.fastq.gz",
+        ]
+        design = tmp_path / "dup.tsv"
+        design.write_text("\n".join([header] + rows))
+        exp = ExperimentDesign(design, allow_pair_duplicates=True)
+        assert len(exp.df) == 2

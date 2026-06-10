@@ -461,3 +461,245 @@ class TestBuildFromWrapFiles:
         tttt_row = result.filter(pl.col("nt_seq") == "tttt").row(0, named=True)
         assert tttt_row["count_e1_s0"] == 25
         assert tttt_row["count_e1_s1"] == 0
+
+
+# ---------------------------------------------------------------------------
+# Trans-library concatenation
+# ---------------------------------------------------------------------------
+
+
+class TestConcatenateReads:
+    """Tests for the trans-library R1+R2 concatenation path."""
+
+    _PHRED_OFFSET = 33
+
+    def _phred(self, score: int) -> str:
+        return chr(score + self._PHRED_OFFSET)
+
+    def _qual(self, score: int, length: int) -> str:
+        return self._phred(score) * length
+
+    def _write_fastq(self, path: Path, reads: list[tuple[str, str]]) -> None:
+        """Write a (possibly gzipped) FASTQ file. Each tuple is (seq, qual)."""
+        opener = gzip.open if str(path).endswith(".gz") else open
+        with opener(path, "wt") as fh:  # type: ignore[call-overload]
+            for i, (seq, qual) in enumerate(reads):
+                fh.write(f"@read{i}\n{seq}\n+\n{qual}\n")
+
+    def _read_fastq(self, path: Path) -> list[tuple[str, str]]:
+        """Read all (seq, qual) pairs from a FASTQ file."""
+        reads = []
+        with gzip.open(path, "rt") as fh:
+            while True:
+                h = fh.readline()
+                if not h:
+                    break
+                seq = fh.readline().rstrip()
+                fh.readline()
+                qual = fh.readline().rstrip()
+                reads.append((seq, qual))
+        return reads
+
+    def _fake_config(self, min_len=4, min_qual=20, max_ee=10.0, rc=False):
+        """Minimal config-like object with trans-library quality parameters."""
+        class FakeConfig:
+            cutadapt_min_length = min_len
+            vsearch_min_qual = min_qual
+            vsearch_max_ee = max_ee
+            trans_library_reverse_complement = rc
+        return FakeConfig()
+
+    def test_basic_concatenation(self, tmp_path):
+        """R1 and R2 sequences are concatenated into a single read."""
+        from pydimsum.wrap.align import _concatenate_reads
+
+        r1 = tmp_path / "r1.fastq.gz"
+        r2 = tmp_path / "r2.fastq.gz"
+        out = tmp_path / "out.fastq.gz"
+        report = tmp_path / "out.report"
+
+        self._write_fastq(r1, [("ACGT", self._qual(30, 4))])
+        self._write_fastq(r2, [("TTTT", self._qual(30, 4))])
+
+        _concatenate_reads(str(r1), str(r2), out, report, self._fake_config())
+
+        reads = self._read_fastq(out)
+        assert len(reads) == 1
+        assert reads[0][0] == "ACGTTTTT"
+        assert len(reads[0][1]) == 8
+
+    def test_reverse_complement_r2(self, tmp_path):
+        """With trans_library_reverse_complement=True, R2 is revcomped before concat."""
+        from pydimsum.wrap.align import _concatenate_reads
+
+        r1 = tmp_path / "r1.fastq.gz"
+        r2 = tmp_path / "r2.fastq.gz"
+        out = tmp_path / "out.fastq.gz"
+        report = tmp_path / "out.report"
+
+        self._write_fastq(r1, [("ACGT", self._qual(30, 4))])
+        self._write_fastq(r2, [("AAAC", self._qual(30, 4))])  # revcomp = GTTT
+
+        _concatenate_reads(str(r1), str(r2), out, report, self._fake_config(rc=True))
+
+        reads = self._read_fastq(out)
+        assert reads[0][0] == "ACGTGTTT"
+
+    def test_rc_qual_string_reversed(self, tmp_path):
+        """Quality string for R2 is reversed when reverse-complementing."""
+        from pydimsum.wrap.align import _concatenate_reads
+
+        r1 = tmp_path / "r1.fastq.gz"
+        r2 = tmp_path / "r2.fastq.gz"
+        out = tmp_path / "out.fastq.gz"
+        report = tmp_path / "out.report"
+
+        q1 = "IIII"  # Phred 40 × 4
+        q2 = "ABCD"  # distinct per-base qualities
+        self._write_fastq(r1, [("ACGT", q1)])
+        self._write_fastq(r2, [("TTTT", q2)])
+
+        _concatenate_reads(str(r1), str(r2), out, report, self._fake_config(rc=True))
+
+        reads = self._read_fastq(out)
+        # R2 qual should be reversed: "DCBA"
+        assert reads[0][1] == "IIII" + "DCBA"
+
+    def test_too_short_filtered(self, tmp_path):
+        """Pairs where either read is shorter than min_len are discarded."""
+        from pydimsum.wrap.align import _concatenate_reads
+
+        r1 = tmp_path / "r1.fastq.gz"
+        r2 = tmp_path / "r2.fastq.gz"
+        out = tmp_path / "out.fastq.gz"
+        report = tmp_path / "out.report"
+
+        # Read 2 of second pair is only 2 nt (below min_len=4)
+        self._write_fastq(r1, [("ACGT", self._qual(30, 4)), ("ACGT", self._qual(30, 4))])
+        self._write_fastq(r2, [("TTTT", self._qual(30, 4)), ("TT", self._qual(30, 2))])
+
+        _concatenate_reads(str(r1), str(r2), out, report, self._fake_config(min_len=4))
+
+        reads = self._read_fastq(out)
+        assert len(reads) == 1
+        assert reads[0][0] == "ACGTTTTT"
+
+    def test_low_quality_filtered(self, tmp_path):
+        """Pairs with any base below min_qual are discarded."""
+        from pydimsum.wrap.align import _concatenate_reads
+
+        r1 = tmp_path / "r1.fastq.gz"
+        r2 = tmp_path / "r2.fastq.gz"
+        out = tmp_path / "out.fastq.gz"
+        report = tmp_path / "out.report"
+
+        good_qual = self._qual(30, 4)
+        bad_qual = self._phred(10) + self._qual(30, 3)  # first base Phred 10
+        self._write_fastq(r1, [("ACGT", good_qual), ("ACGT", bad_qual)])
+        self._write_fastq(r2, [("TTTT", good_qual), ("TTTT", good_qual)])
+
+        _concatenate_reads(str(r1), str(r2), out, report, self._fake_config(min_qual=20))
+
+        reads = self._read_fastq(out)
+        assert len(reads) == 1
+
+    def test_high_expected_errors_filtered(self, tmp_path):
+        """Pairs with combined expected errors > max_ee are discarded."""
+        from pydimsum.wrap.align import _concatenate_reads
+
+        r1 = tmp_path / "r1.fastq.gz"
+        r2 = tmp_path / "r2.fastq.gz"
+        out = tmp_path / "out.fastq.gz"
+        report = tmp_path / "out.report"
+
+        # Phred 10 → error prob = 0.1 per base; 4+4=8 bases → ee=0.8 (< max_ee=1.0 → pass)
+        # Phred 3  → error prob = 0.5 per base; 4+4=8 bases → ee=4.0 (> max_ee=1.0 → fail)
+        good_qual = self._qual(10, 4)
+        bad_qual  = self._qual(3, 4)   # Phred 3 ≈ 50% error per base
+        self._write_fastq(r1, [("ACGT", good_qual), ("ACGT", bad_qual)])
+        self._write_fastq(r2, [("TTTT", good_qual), ("TTTT", good_qual)])
+
+        _concatenate_reads(str(r1), str(r2), out, report, self._fake_config(min_qual=1, max_ee=1.0))
+
+        reads = self._read_fastq(out)
+        assert len(reads) == 1
+
+    def test_report_written(self, tmp_path):
+        """A report file is written with read pair statistics."""
+        from pydimsum.wrap.align import _concatenate_reads
+
+        r1 = tmp_path / "r1.fastq.gz"
+        r2 = tmp_path / "r2.fastq.gz"
+        out = tmp_path / "out.fastq.gz"
+        report = tmp_path / "out.report"
+
+        self._write_fastq(r1, [("ACGT", self._qual(30, 4)), ("ACGT", self._qual(30, 4))])
+        self._write_fastq(r2, [("TTTT", self._qual(30, 4)), ("TT", self._qual(30, 2))])
+
+        _concatenate_reads(str(r1), str(r2), out, report, self._fake_config(min_len=4))
+
+        assert report.exists()
+        text = report.read_text()
+        assert "Pairs" in text
+        assert "Merged" in text
+        assert "Too short" in text
+
+    def test_all_reads_pass_when_thresholds_zero(self, tmp_path):
+        """With min_len=0, min_qual=0, max_ee=∞ all reads pass."""
+        from pydimsum.wrap.align import _concatenate_reads
+
+        r1 = tmp_path / "r1.fastq.gz"
+        r2 = tmp_path / "r2.fastq.gz"
+        out = tmp_path / "out.fastq.gz"
+        report = tmp_path / "out.report"
+
+        reads_in = [("ACGT", "!!!!"), ("TTTT", "!!!!"), ("GCGC", "!!!!")]
+        self._write_fastq(r1, reads_in)
+        self._write_fastq(r2, reads_in)
+
+        _concatenate_reads(
+            str(r1), str(r2), out, report,
+            self._fake_config(min_len=0, min_qual=0, max_ee=float("inf"))
+        )
+
+        reads_out = self._read_fastq(out)
+        assert len(reads_out) == 3
+
+
+# ---------------------------------------------------------------------------
+# Config: trans_library validation
+# ---------------------------------------------------------------------------
+
+
+class TestTransLibraryConfig:
+    def test_trans_library_requires_paired(self):
+        from pydimsum.config import RunConfig
+
+        with pytest.raises(ValueError, match="trans_library requires paired"):
+            RunConfig(
+                experiment_design_path=Path(__file__).parent / "data" / "experimentDesign_Toy.txt",
+                wildtype_sequence="ACGT",
+                trans_library=True,
+                paired=False,
+            )
+
+    def test_trans_library_paired_is_valid(self):
+        from pydimsum.config import RunConfig
+
+        config = RunConfig(
+            experiment_design_path=Path(__file__).parent / "data" / "experimentDesign_Toy.txt",
+            wildtype_sequence="ACGT",
+            trans_library=True,
+            paired=True,
+        )
+        assert config.trans_library is True
+
+    def test_trans_library_false_by_default(self):
+        from pydimsum.config import RunConfig
+
+        config = RunConfig(
+            experiment_design_path=Path(__file__).parent / "data" / "experimentDesign_Toy.txt",
+            wildtype_sequence="ACGT",
+        )
+        assert config.trans_library is False
+        assert config.trans_library_reverse_complement is False

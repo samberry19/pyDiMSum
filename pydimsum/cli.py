@@ -64,6 +64,27 @@ def main(
         "--count_path", "--countPath",
         help="Path to variant count file (STEAM-only mode).",
     ),
+    fastq_file_dir: Optional[Path] = typer.Option(
+        None,
+        "--fastq_file_dir", "--fastqFileDir",
+        help="Directory containing FASTQ files (overrides pair_directory column in design file).",
+    ),
+    fastq_file_extension: str = typer.Option(
+        ".fastq",
+        "--fastq_file_extension", "--fastqFileExtension",
+        help="File extension for FASTQ files (default: .fastq).",
+    ),
+    gzipped: bool = typer.Option(
+        True,
+        "--gzipped/--no_gzipped",
+        help="Whether FASTQ files are gzipped (default: True).",
+    ),
+    experiment_design_pair_duplicates: bool = typer.Option(
+        False,
+        "--experiment_design_pair_duplicates/--no_experiment_design_pair_duplicates",
+        "--experimentDesignPairDuplicates",
+        help="Allow duplicate FASTQ pair entries in the experiment design file.",
+    ),
     start_stage: int = typer.Option(0, "--start_stage", "--startStage"),
     stop_stage: int = typer.Option(5, "--stop_stage", "--stopStage"),
     num_cores: int = typer.Option(1, "--num_cores", "--numCores"),
@@ -76,6 +97,20 @@ def main(
     mixed_substitutions: bool = typer.Option(False, "--mixed_substitutions", "--mixedSubstitutions"),
     indels: str = typer.Option("none", "--indels"),
     reverse_complement: bool = typer.Option(False, "--reverse_complement", "--reverseComplement"),
+    # ---- Trans-library (WRAP) ----
+    trans_library: bool = typer.Option(
+        False, "--trans_library/--no_trans_library", "--transLibrary",
+        help=(
+            "Paired-end reads correspond to distinct molecules: "
+            "concatenate R1+R2 instead of overlap-merging with VSEARCH."
+        ),
+    ),
+    trans_library_reverse_complement: bool = typer.Option(
+        False,
+        "--trans_library_reverse_complement/--no_trans_library_reverse_complement",
+        "--transLibraryReverseComplement",
+        help="Reverse-complement R2 before concatenation (trans-library mode only).",
+    ),
     # ---- Fitness / analysis ----
     fitness_min_input_count_all: str = typer.Option("0", "--fitness_min_input_count_all", "--fitnessMinInputCountAll"),
     fitness_min_input_count_any: str = typer.Option("0", "--fitness_min_input_count_any", "--fitnessMinInputCountAny"),
@@ -141,6 +176,10 @@ def main(
             output_path=output_path,
             project_name=project_name,
             count_path=count_path,
+            fastq_file_dir=fastq_file_dir,
+            fastq_file_extension=fastq_file_extension,
+            gzipped=gzipped,
+            experiment_design_pair_duplicates=experiment_design_pair_duplicates,
             start_stage=start_stage,
             stop_stage=stop_stage,
             num_cores=num_cores,
@@ -152,6 +191,8 @@ def main(
             mixed_substitutions=mixed_substitutions,
             indels=indels,
             reverse_complement=reverse_complement,
+            trans_library=trans_library,
+            trans_library_reverse_complement=trans_library_reverse_complement,
             fitness_min_input_count_all=fitness_min_input_count_all,
             fitness_min_input_count_any=fitness_min_input_count_any,
             fitness_min_output_count_all=fitness_min_output_count_all,

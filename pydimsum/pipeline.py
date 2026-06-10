@@ -40,6 +40,8 @@ from pydimsum.steam.merge_fitness import merge_fitness
 from pydimsum.steam.mutations import identify_doubles, identify_singles
 from pydimsum.steam.process_variants import process_variants
 from pydimsum.steam.error_model import fit_error_model, _fit_normalisation
+from pydimsum.steam.growth_rates import has_growth_rate_data, infer_growth_rates
+from pydimsum.steam.merge_fitness import _inverse_variance_merge
 
 logger = logging.getLogger(__name__)
 
@@ -62,7 +64,12 @@ def run_pipeline(config: RunConfig) -> None:
     logger.info("Sequence type: %s (resolved: %s)", config.sequence_type, config.sequence_type_resolved)
 
     # ---- Load experiment design ----
-    exp_design = ExperimentDesign(config.experiment_design_path, count_path=config.count_path)
+    exp_design = ExperimentDesign(
+        config.experiment_design_path,
+        count_path=config.count_path,
+        fastq_file_dir=config.fastq_file_dir,
+        allow_pair_duplicates=config.experiment_design_pair_duplicates,
+    )
     replicates = exp_design.replicates
 
     if config.retained_replicates != "all":
@@ -332,6 +339,10 @@ def _run_steam(
         _write_tsv(processed.rejected, config.project_path / f"{config.project_name}_rejected_variant_data_merge.tsv")
         _write_tsv(retained, config.project_path / f"{config.project_name}_variant_data_merge.tsv")
 
+        # Capture for report
+        _variant_stats = processed.stats
+        _count_cols = [c for c in variant_df.columns if c.startswith("count_")]
+
         # Save for stage 5
         _variant_data = retained
     else:
@@ -447,6 +458,18 @@ def _run_steam(
                 doubles_df, exp_design.df, replicates, fitness_suffix="_uncorr"
             )
 
+    # ---- Growth rates (optional, requires cell_density + selection_time) ----
+    if has_growth_rate_data(exp_design.df):
+        logger.info("Inferring growth rates from cell-density data...")
+        # Pre-compute merged fitness/sigma so infer_growth_rates can fit the
+        # final linear model in step 4 (merge_fitness will recompute — idempotent).
+        nff_data = _inverse_variance_merge(
+            nff_data, replicates,
+            fitness_suffix="_uncorr", sigma_suffix="_uncorr",
+            out_fitness="fitness", out_sigma="sigma",
+        )
+        nff_data = infer_growth_rates(nff_data, exp_design.df, replicates)
+
     # ---- Save error model and normalisation model ----
     if model_result["error_model"] is not None:
         model_result["error_model"].write_csv(
@@ -469,6 +492,22 @@ def _run_steam(
         project_name=config.project_name,
         bayesian_double_fitness=config.bayesian_double_fitness,
     )
+
+    # ---- HTML report ----
+    try:
+        from pydimsum.report.html import generate_report
+        generate_report(
+            stats=_variant_stats,
+            variant_df=_variant_data,
+            fitness_df=nff_data,
+            singles_df=singles_df,
+            replicates=replicates,
+            count_cols=_count_cols,
+            config=config,
+            output_path=config.project_path,
+        )
+    except Exception as exc:
+        logger.warning("HTML report generation skipped: %s", exc)
 
     logger.info("=== pyDiMSum pipeline complete ===")
     logger.info("Output files written to: %s", config.project_path)

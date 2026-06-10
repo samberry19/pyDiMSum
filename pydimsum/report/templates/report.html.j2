@@ -1,0 +1,165 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>pyDiMSum Report — {{ project_name }}</title>
+  <style>
+    body { font-family: sans-serif; font-size: 14px; color: #222; margin: 0; background: #f5f5f5; }
+    .container { max-width: 1100px; margin: 0 auto; padding: 20px 30px 60px; }
+    h1 { font-size: 1.6em; margin: 0 0 4px; color: #1a1a2e; }
+    .subtitle { color: #555; font-size: 0.95em; margin-bottom: 30px; }
+    h2 { font-size: 1.15em; border-bottom: 2px solid #3a86ff; padding-bottom: 5px;
+         color: #1a1a2e; margin-top: 40px; }
+    h3 { font-size: 0.95em; color: #444; margin: 14px 0 6px; }
+    table.info { border-collapse: collapse; width: 100%; }
+    table.info th { text-align: left; padding: 5px 12px 5px 0; color: #666;
+                    font-weight: normal; width: 220px; vertical-align: top; }
+    table.info td { padding: 5px 0; }
+    table.stats { border-collapse: collapse; font-size: 12px; }
+    table.stats th { background: #eee; padding: 5px 10px; text-align: right;
+                     border-bottom: 1px solid #ccc; }
+    table.stats th:first-child { text-align: left; }
+    table.stats td { padding: 4px 10px; text-align: right; border-bottom: 1px solid #f0f0f0; }
+    table.stats td:first-child { text-align: left; }
+    table.stats tr:hover td { background: #fafafa; }
+    .plot-row { display: flex; flex-wrap: wrap; gap: 20px; margin: 16px 0; }
+    .plot-box { background: white; border-radius: 4px; box-shadow: 0 1px 4px rgba(0,0,0,0.1);
+                padding: 12px; flex: 1 1 auto; min-width: 300px; }
+    .plot-box img { max-width: 100%; height: auto; display: block; }
+    .card { background: white; border-radius: 4px; box-shadow: 0 1px 4px rgba(0,0,0,0.1);
+            padding: 16px 20px; margin-bottom: 12px; }
+    .badge { display: inline-block; padding: 2px 8px; border-radius: 10px;
+             background: #e0e7ff; color: #3a86ff; font-size: 11px; margin-left: 6px; }
+    .warn { color: #c0392b; font-size: 12px; }
+    footer { text-align: center; color: #999; font-size: 11px; margin-top: 40px; }
+    code { font-family: monospace; background: #f0f0f0; padding: 1px 4px; border-radius: 3px; }
+  </style>
+</head>
+<body>
+<div class="container">
+
+  <h1>pyDiMSum Analysis Report <span class="badge">{{ mode }}</span></h1>
+  <div class="subtitle">Project: <strong>{{ project_name }}</strong> &nbsp;·&nbsp; Generated: {{ run_date }}</div>
+
+  <!-- ============================== Run Summary ============================== -->
+  <h2>Run Summary</h2>
+  <div class="card">
+    <table class="info">
+      <tr><th>Project name</th><td><code>{{ project_name }}</code></td></tr>
+      <tr><th>Output directory</th><td><code>{{ output_path }}</code></td></tr>
+      <tr><th>Replicates</th><td>{{ replicates | join(', ') }}</td></tr>
+      <tr><th>Samples (count cols)</th><td>{{ n_count_cols }}</td></tr>
+      <tr><th>Sequence type</th><td>{{ sequence_type }}</td></tr>
+      {% if wt_seq %}<tr><th>WT sequence (nt)</th><td><code style="word-break:break-all">{{ wt_seq[:60] }}{% if wt_seq|length > 60 %}…{% endif %}</code> ({{ wt_seq|length }} nt)</td></tr>{% endif %}
+      <tr><th>Total input variants</th><td>{{ n_input_variants }}</td></tr>
+      <tr><th>Retained variants</th><td>{{ n_retained_variants }}</td></tr>
+    </table>
+  </div>
+
+  <!-- ============================== Variant Processing ============================== -->
+  <h2>Variant Processing</h2>
+
+  {% if processing_counts_plot %}
+  <div class="plot-row">
+    <div class="plot-box">
+      <h3>Reads by category (counts)</h3>
+      <img src="{{ processing_counts_plot }}" alt="Variant processing counts">
+    </div>
+    <div class="plot-box">
+      <h3>Reads by category (percentages)</h3>
+      <img src="{{ processing_pct_plot }}" alt="Variant processing percentages">
+    </div>
+  </div>
+  {% endif %}
+
+  {% if stats_table %}
+  <div class="card">
+    <h3>Rejection summary</h3>
+    <table class="stats">
+      <tr>
+        <th>Category</th>
+        {% for col in stats_table.cols %}<th>{{ col }}</th>{% endfor %}
+      </tr>
+      {% for row in stats_table.rows %}
+      <tr>
+        {% for cell in row %}<td>{{ cell }}</td>{% endfor %}
+      </tr>
+      {% endfor %}
+    </table>
+  </div>
+  {% endif %}
+
+  <!-- ============================== Diagnostics ============================== -->
+  <h2>Diagnostics</h2>
+
+  <div class="plot-row">
+    {% if count_dist_plot %}
+    <div class="plot-box">
+      <h3>Input count distributions by Nham</h3>
+      <img src="{{ count_dist_plot }}" alt="Count distributions">
+    </div>
+    {% endif %}
+    {% if count_scatter_plot %}
+    <div class="plot-box">
+      <h3>Sample count correlations</h3>
+      <img src="{{ count_scatter_plot }}" alt="Count scatter matrix">
+    </div>
+    {% endif %}
+  </div>
+
+  <!-- ============================== WRAP Processing ============================== -->
+  {% if vsearch_stats_plot or cutadapt_stats_plot %}
+  <h2>Read Processing (WRAP)</h2>
+  <div class="plot-row">
+    {% if cutadapt_stats_plot %}
+    <div class="plot-box">
+      <h3>Cutadapt trimming statistics</h3>
+      <img src="{{ cutadapt_stats_plot }}" alt="Cutadapt stats">
+    </div>
+    {% endif %}
+    {% if vsearch_stats_plot %}
+    <div class="plot-box">
+      <h3>VSEARCH alignment statistics</h3>
+      <img src="{{ vsearch_stats_plot }}" alt="VSEARCH stats">
+    </div>
+    {% endif %}
+  </div>
+  {% endif %}
+
+  <!-- ============================== Fitness Analysis ============================== -->
+  {% if fitness_scatter_plot or qqplot %}
+  <h2>Fitness Analysis</h2>
+  <div class="plot-row">
+    {% if fitness_scatter_plot %}
+    <div class="plot-box">
+      <h3>Replicate fitness correlations</h3>
+      <img src="{{ fitness_scatter_plot }}" alt="Replicate fitness scatter">
+    </div>
+    {% endif %}
+    {% if qqplot %}
+    <div class="plot-box">
+      <h3>Error model QQ plot (leave-one-out z-scores)</h3>
+      <img src="{{ qqplot }}" alt="Error model QQ plot">
+    </div>
+    {% endif %}
+  </div>
+  {% endif %}
+
+  <!-- ============================== Run Settings ============================== -->
+  <h2>Run Settings</h2>
+  <div class="card">
+    <table class="info">
+      {% for key, value in settings %}
+      <tr><th>{{ key }}</th><td><code>{{ value }}</code></td></tr>
+      {% endfor %}
+    </table>
+  </div>
+
+  <footer>
+    Generated by <strong>pyDiMSum</strong> on {{ run_date }}
+  </footer>
+
+</div>
+</body>
+</html>

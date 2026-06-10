@@ -180,9 +180,12 @@ def _run_trans_library(
     outpath: Path,
     extra_opts: list[str],
 ) -> None:
-    """Trans-library mode: concatenate R1+revcomp(R2) instead of merging.
+    """Trans-library mode: concatenate R1+(optional revcomp)R2 instead of merging.
 
-    Mirrors: R/dimsum__concatenate_reads.R (simplified).
+    Applies the same per-pair quality filters as VSEARCH merge mode:
+    min read length, min base quality, max expected errors.
+
+    Mirrors: R/dimsum__concatenate_reads.R
     """
     rows = exp_design_df.to_dicts()
     for row, sname in zip(rows, sample_names):
@@ -190,9 +193,10 @@ def _run_trans_library(
         abs1 = str(pdir / row["pair1"])
         abs2 = str(pdir / row.get("pair2", row["pair1"]))
         output_fastq = outpath / f"{sname}.vsearch.gz"
+        output_report = outpath / f"{sname}.report"
 
         logger.info("  Trans-library concat: %s + %s", row["pair1"], row.get("pair2"))
-        _concatenate_reads(abs1, abs2, output_fastq, config)
+        _concatenate_reads(abs1, abs2, output_fastq, output_report, config)
 
 
 # ---------------------------------------------------------------------------
@@ -349,48 +353,120 @@ def _concatenate_reads(
     abs1: str,
     abs2: str,
     output_fastq: Path,
+    output_report: Path,
     config: RunConfig,
 ) -> None:
-    """Concatenate R1 + reverse_complement(R2) for trans-library experiments.
+    """Concatenate R1 + optional revcomp(R2) for trans-library experiments.
+
+    Applies the same per-pair quality gates as VSEARCH merge mode:
+      - discard if either read is shorter than cutadapt_min_length
+      - discard if any base in either read has Phred < vsearch_min_qual
+      - discard if combined expected errors > vsearch_max_ee
 
     Mirrors: R/dimsum__concatenate_reads.R
     """
     from Bio.Seq import Seq
 
     rc = config.trans_library_reverse_complement
+    min_len = config.cutadapt_min_length
+    min_qual = config.vsearch_min_qual
+    max_ee = config.vsearch_max_ee
 
-    with gzip.open(output_fastq, "wt") as fout:
-        opener1 = gzip.open if abs1.endswith(".gz") else open
-        opener2 = gzip.open if abs2.endswith(".gz") else open
+    n_pairs = 0
+    n_merged = 0
+    n_too_short = 0
+    n_min_q_too_low = 0
+    n_exp_err_too_high = 0
+    length_hist: Counter[int] = Counter()
 
-        with opener1(abs1, "rt") as f1, opener2(abs2, "rt") as f2:  # type: ignore[arg-type]
-            while True:
-                h1 = f1.readline()
-                if not h1:
-                    break
-                s1 = f1.readline().rstrip("\n")
-                f1.readline()  # +
-                q1 = f1.readline().rstrip("\n")
+    opener1 = gzip.open if abs1.endswith(".gz") else open
+    opener2 = gzip.open if abs2.endswith(".gz") else open
 
-                h2 = f2.readline()
-                s2 = f2.readline().rstrip("\n")
-                f2.readline()  # +
-                q2 = f2.readline().rstrip("\n")
+    with opener1(abs1, "rt") as f1, opener2(abs2, "rt") as f2, \
+         gzip.open(output_fastq, "wt") as fout:  # type: ignore[arg-type]
+        while True:
+            h1 = f1.readline()
+            if not h1:
+                break
+            s1 = f1.readline().rstrip("\n")
+            f1.readline()  # +
+            q1 = f1.readline().rstrip("\n")
 
-                if rc:
-                    s2_out = str(Seq(s2).reverse_complement())
-                    q2_out = q2[::-1]
-                else:
-                    s2_out = s2
-                    q2_out = q2
+            h2 = f2.readline()
+            s2 = f2.readline().rstrip("\n")
+            f2.readline()  # +
+            q2 = f2.readline().rstrip("\n")
 
-                concat_seq = s1 + s2_out
-                concat_qual = q1 + q2_out
+            n_pairs += 1
 
-                fout.write(h1)
-                fout.write(concat_seq + "\n")
-                fout.write("+\n")
-                fout.write(concat_qual + "\n")
+            # Length filter
+            if len(s1) < min_len or len(s2) < min_len:
+                n_too_short += 1
+                continue
+
+            # Minimum base quality filter (any base below threshold → discard)
+            q1_phred = [ord(c) - _PHRED_OFFSET for c in q1]
+            q2_phred = [ord(c) - _PHRED_OFFSET for c in q2]
+            if any(q < min_qual for q in q1_phred) or any(q < min_qual for q in q2_phred):
+                n_min_q_too_low += 1
+                continue
+
+            # Expected errors filter (sum of 10^(-Q/10) across both reads)
+            exp_err = sum(10 ** (-q / 10.0) for q in q1_phred + q2_phred)
+            if exp_err > max_ee:
+                n_exp_err_too_high += 1
+                continue
+
+            # Optionally reverse-complement R2
+            if rc:
+                s2_out = str(Seq(s2).reverse_complement())
+                q2_out = q2[::-1]
+            else:
+                s2_out = s2
+                q2_out = q2
+
+            concat_seq = s1 + s2_out
+            concat_qual = q1 + q2_out
+
+            fout.write(h1)
+            fout.write(concat_seq + "\n")
+            fout.write("+\n")
+            fout.write(concat_qual + "\n")
+
+            n_merged += 1
+            length_hist[len(concat_seq)] += 1
+
+    # Build length distribution stats
+    stats: dict = {
+        "Pairs": n_pairs,
+        "Merged": n_merged,
+        "Too_short": n_too_short,
+        "No_alignment_found": 0,
+        "Too_many_diffs": 0,
+        "Overlap_too_short": 0,
+        "Exp.errs._too_high": n_exp_err_too_high,
+        "Min_Q_too_low": n_min_q_too_low,
+    }
+    if n_merged > 0:
+        expanded = []
+        for length, cnt in sorted(length_hist.items()):
+            expanded.extend([length] * cnt)
+        n = len(expanded)
+        stats["Merged_length_min"] = expanded[0]
+        stats["Merged_length_max"] = expanded[-1]
+        stats["Merged_length_median"] = expanded[n // 2]
+        stats["Merged_length_low"] = expanded[n // 4]
+        stats["Merged_length_high"] = expanded[3 * n // 4]
+    else:
+        for k in ["Merged_length_min", "Merged_length_low", "Merged_length_median",
+                  "Merged_length_high", "Merged_length_max"]:
+            stats[k] = "NA"
+
+    _write_report(output_report, stats)
+    logger.info(
+        "  Trans-library: %d pairs → %d merged (%d too short, %d low qual, %d high ee)",
+        n_pairs, n_merged, n_too_short, n_min_q_too_low, n_exp_err_too_high,
+    )
 
 
 # ---------------------------------------------------------------------------

@@ -32,8 +32,15 @@ class ExperimentDesign:
         Sorted unique experiment_replicate values.
     """
 
-    def __init__(self, path: Path, count_path: Path | None = None) -> None:
+    def __init__(
+        self,
+        path: Path,
+        count_path: Path | None = None,
+        fastq_file_dir: Path | None = None,
+        allow_pair_duplicates: bool = False,
+    ) -> None:
         self.path = path
+        self._allow_pair_duplicates = allow_pair_duplicates
         # Normalize line endings (handle \r-only, \r\n, \n uniformly)
         raw = path.read_bytes().replace(b"\r\n", b"\n").replace(b"\r", b"\n")
         import io
@@ -60,6 +67,12 @@ class ExperimentDesign:
             if col not in df.columns:
                 df = df.with_columns(pl.lit(None).cast(pl.Float64).alias(col))
 
+        # Apply fastq_file_dir override: sets pair_directory for all rows
+        if fastq_file_dir is not None:
+            df = df.with_columns(
+                pl.lit(str(fastq_file_dir)).alias("pair_directory")
+            )
+
         # Clear FASTQ columns when using count file
         if count_path is not None:
             for col in ["technical_replicate", "pair1", "pair2"]:
@@ -83,6 +96,19 @@ class ExperimentDesign:
             raise ValueError(
                 f"selection_id must be 0 (input) or 1 (output), found: {bad}"
             )
+        # Check for duplicate FASTQ pairs (unless explicitly allowed)
+        if not self._allow_pair_duplicates:
+            pair_cols = [c for c in ("pair1", "pair2") if c in self.df.columns]
+            if pair_cols:
+                non_null = self.df.filter(pl.col(pair_cols[0]).is_not_null())
+                if len(non_null) > 0:
+                    key = pl.concat_str(pair_cols, separator="\t")
+                    n_unique = non_null.select(key.alias("_key"))["_key"].n_unique()
+                    if n_unique < len(non_null):
+                        raise ValueError(
+                            "Duplicate FASTQ pair entries found in experiment design. "
+                            "Use --experiment_design_pair_duplicates to allow duplicates."
+                        )
 
     @property
     def replicates(self) -> list[int]:
@@ -126,6 +152,47 @@ class ExperimentDesign:
             f"_s{int(row['selection_id'])}"
             f"_b{brep_str}_tNA_count"
         )
+
+
+# ---------------------------------------------------------------------------
+# Barcode identity
+# ---------------------------------------------------------------------------
+
+def load_barcode_identity(path: Path) -> dict[str, str]:
+    """Load a barcode-to-variant identity file.
+
+    Expected format: tab-separated with columns ``barcode`` and ``variant``
+    (both A/C/G/T nucleotide sequences, case-insensitive).
+
+    Returns a dict mapping ``barcode.lower() → variant.lower()``.
+
+    Mirrors dimsum__check_barcodeidentityfile.R.
+    """
+    import io as _io
+    raw = Path(path).read_bytes().replace(b"\r\n", b"\n").replace(b"\r", b"\n")
+    df = pl.read_csv(_io.BytesIO(raw), separator="\t", null_values=["", "NA"])
+
+    mandatory = ["barcode", "variant"]
+    missing = [c for c in mandatory if c not in df.columns]
+    if missing:
+        raise ValueError(
+            f"Mandatory columns missing from barcodeIdentity file: {missing}. "
+            "Required columns: 'barcode', 'variant'."
+        )
+
+    bad_rows = df.filter(
+        pl.col("barcode").str.contains(r"[^ACGTacgt]") |
+        pl.col("variant").str.contains(r"[^ACGTacgt]")
+    )
+    if len(bad_rows) > 0:
+        raise ValueError(
+            f"barcodeIdentity file contains non-ACGT characters in {len(bad_rows)} rows."
+        )
+
+    return {
+        str(row["barcode"]).lower(): str(row["variant"]).lower()
+        for row in df.iter_rows(named=True)
+    }
 
 
 # ---------------------------------------------------------------------------

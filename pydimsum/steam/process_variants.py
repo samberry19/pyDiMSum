@@ -102,10 +102,12 @@ def process_variants(
         )
 
     # ------------------------------------------------------------------ #
-    # 2. No-barcode filtering (barcode_identity_path support)             #
-    # In STEAM-only mode there are no barcodes to filter.                 #
+    # 2. Barcode identity debarcoding (optional)                          #
     # ------------------------------------------------------------------ #
-    nobarcode_df = pl.DataFrame({"nt_seq": pl.Series([], dtype=pl.Utf8)})
+    if config.barcode_identity_path is not None:
+        df, nobarcode_df = _debarcode_variants(df, config, count_cols)
+    else:
+        nobarcode_df = pl.DataFrame({"nt_seq": pl.Series([], dtype=pl.Utf8)})
 
     # ------------------------------------------------------------------ #
     # 3. Mark indels and split                                            #
@@ -291,6 +293,8 @@ def process_variants(
     # ------------------------------------------------------------------ #
     # 8. Nmut_codons + mixed-substitutions filter                         #
     # ------------------------------------------------------------------ #
+    _check_variants(subst_df, count_cols)
+
     if len(subst_df):
         nt_seqs_cur = subst_df["nt_seq"].to_list()
         mat_cur = encode(nt_seqs_cur)
@@ -376,6 +380,7 @@ def process_variants(
         retained_df=retained_df,
         rejected_df=rejected_df,
         indel_df=indel_df,
+        nobarcode_df=nobarcode_df,
         count_cols=count_cols,
         seq_type=seq_type,
     )
@@ -405,6 +410,42 @@ def process_variants(
 
 
 # ---------------------------------------------------------------------------
+# WT presence guard (mirrors R/dimsum__check_variants.R)
+# ---------------------------------------------------------------------------
+
+def _check_variants(subst_df: pl.DataFrame, count_cols: list[str]) -> None:
+    """Raise RuntimeError if WT is absent or fewer than 2 substitution variants remain."""
+    wt_present = subst_df["WT"].fill_null(False).any()
+    if not wt_present:
+        # Show top-5 candidates by mean count to aid debugging
+        if count_cols:
+            mean_count = subst_df.select(
+                [pl.col(c).fill_null(0).cast(pl.Float64) for c in count_cols if c in subst_df.columns]
+            ).mean_horizontal()
+            top5 = (
+                subst_df
+                .with_columns(mean_count.alias("_mean_count"))
+                .sort("_mean_count", descending=True)
+                .head(5)["nt_seq"]
+                .to_list()
+            )
+            candidates = ", ".join(top5)
+        else:
+            candidates = "(no count columns)"
+        raise RuntimeError(
+            f"WT variant not found in variant table after filtering. "
+            f"Check wildtypeSequence is correct. "
+            f"Top 5 sequences by mean count: {candidates}"
+        )
+    n_non_wt = subst_df.filter(~pl.col("WT").fill_null(False)).height
+    if n_non_wt < 2:
+        raise RuntimeError(
+            f"Fewer than 2 non-WT variants remain after filtering (found {n_non_wt}). "
+            "Check filters are not too strict."
+        )
+
+
+# ---------------------------------------------------------------------------
 # Statistics helper
 # ---------------------------------------------------------------------------
 
@@ -412,6 +453,7 @@ def _compute_stats(
     retained_df: pl.DataFrame,
     rejected_df: pl.DataFrame,
     indel_df: pl.DataFrame,
+    nobarcode_df: pl.DataFrame,
     count_cols: list[str],
     seq_type: str,
 ) -> dict:
@@ -427,10 +469,17 @@ def _compute_stats(
             if c in df.columns
         }
 
+    def _filtered_sums(df: pl.DataFrame, col: str, val) -> dict[str, int]:
+        if not isinstance(df, pl.DataFrame) or len(df) == 0 or col not in df.columns:
+            return {c: 0 for c in count_cols}
+        return _col_sums(df.filter(pl.col(col) == val))
+
     stats["nuc_indel_dict"] = _col_sums(indel_df)
-    stats["nuc_const_dict"] = _col_sums(
-        rejected_df.filter(pl.col("constant_region") == False) if "constant_region" in rejected_df.columns else pl.DataFrame()
-    )
+    stats["nuc_nbarc_dict"] = _col_sums(nobarcode_df)
+    stats["nuc_const_dict"] = _filtered_sums(rejected_df, "constant_region", False)
+    stats["nuc_frbdn_dict"] = _filtered_sums(rejected_df, "permitted", False)
+    stats["nuc_tmsub_dict"] = _filtered_sums(rejected_df, "too_many_substitutions", True)
+    stats["nuc_mxsub_dict"] = _filtered_sums(rejected_df, "mixed_substitutions", True)
 
     # Substitution distributions in retained variants
     if seq_type == "coding" and "Nham_aa" in retained_df.columns:
@@ -462,3 +511,86 @@ def _compute_stats(
                 )
 
     return stats
+
+
+# ---------------------------------------------------------------------------
+# Barcode debarcoding helper
+# ---------------------------------------------------------------------------
+
+def _debarcode_variants(
+    df: pl.DataFrame,
+    config: "RunConfig",
+    count_cols: list[str],
+) -> tuple[pl.DataFrame, pl.DataFrame]:
+    """Replace barcode sequences with their mapped variant sequences.
+
+    Mirrors: R/dimsum__debarcode_variants.R
+
+    Parameters
+    ----------
+    df:
+        Wide count table with ``nt_seq`` column (barcode sequences).
+    config:
+        RunConfig with ``barcode_identity_path`` set.
+    count_cols:
+        List of count column names (``count_e*``).
+
+    Returns
+    -------
+    (debarcoded_df, nobarcode_df):
+        debarcoded_df: rows with valid barcodes, ``nt_seq`` replaced with
+            the mapped variant, counts aggregated per unique variant.
+        nobarcode_df: rows with invalid (unknown) barcodes.
+    """
+    from pydimsum.io.designs import load_barcode_identity
+
+    barcode_map = load_barcode_identity(config.barcode_identity_path)
+    logger.info("Loaded %d barcode→variant mappings", len(barcode_map))
+
+    # Flag valid vs. invalid barcodes
+    seqs = df["nt_seq"].to_list()
+    valid_flags = [s in barcode_map for s in seqs]
+    df = df.with_columns(
+        pl.Series("barcode_valid", valid_flags, dtype=pl.Boolean)
+    )
+
+    n_valid = sum(valid_flags)
+    n_invalid = len(valid_flags) - n_valid
+    logger.info(
+        "Barcode debarcoding: %d valid, %d invalid (unknown barcode)",
+        n_valid, n_invalid,
+    )
+
+    if n_valid == 0:
+        raise RuntimeError(
+            "Cannot proceed with variant processing: "
+            "No valid barcodes found. Check barcodeIdentityPath."
+        )
+
+    nobarcode_df = df.filter(~pl.col("barcode_valid")).select(
+        ["nt_seq"] + count_cols
+    )
+
+    valid_df = df.filter(pl.col("barcode_valid"))
+
+    # Replace nt_seq with mapped variant
+    new_seqs = [barcode_map[s] for s in valid_df["nt_seq"].to_list()]
+    valid_df = valid_df.with_columns(
+        pl.Series("nt_seq", new_seqs, dtype=pl.Utf8)
+    )
+
+    # Aggregate counts for identical variants
+    agg_exprs = [
+        pl.col(c).fill_null(0).sum().alias(c) for c in count_cols
+    ]
+    debarcoded_df = (
+        valid_df.group_by("nt_seq")
+        .agg(agg_exprs)
+    )
+
+    logger.info(
+        "After debarcoding: %d unique variants (from %d valid-barcode rows)",
+        len(debarcoded_df), n_valid,
+    )
+
+    return debarcoded_df, nobarcode_df
