@@ -1,5 +1,7 @@
 # pyDiMSum
 
+<img width="400" height="400" alt="image" src="https://github.com/user-attachments/assets/d24065d9-6d59-45ac-ba91-a1ee376e58ca" />
+
 A Python reimplementation of the [DiMSum](https://github.com/lehner-lab/DiMSum) deep mutational scanning analysis pipeline (Faure et al., *Genome Biology* 2020).
 
 ## Why?
