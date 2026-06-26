@@ -874,3 +874,112 @@ class TestRunSingleEnd:
         # align_reads must return the updated df with aligned_pair columns
         assert "aligned_pair" in result_df.columns
         assert "aligned_pair_directory" in result_df.columns
+
+
+# ---------------------------------------------------------------------------
+# Cutadapt global defaults: _fill_cutadapt_defaults
+# ---------------------------------------------------------------------------
+
+
+class TestFillCutadaptDefaults:
+    """_fill_cutadapt_defaults mirrors R get_experiment_design.R:48-67, 154-161."""
+
+    def _make_config(self, **kwargs):
+        from pydimsum.config import RunConfig
+        return RunConfig(
+            experiment_design_path=Path(__file__).parent / "data" / "experimentDesign_Toy.txt",
+            wildtype_sequence="ACGT",
+            **kwargs,
+        )
+
+    def _minimal_df(self, extra_cols: dict | None = None):
+        data = {
+            "sample_name": ["s1", "s2"],
+            "experiment_replicate": [1, 1],
+            "experiment": [1, 1],
+            "selection_id": [0, 1],
+            "biological_replicate": [1, 1],
+            "pair_directory": ["/tmp", "/tmp"],
+            "pair1": ["r1.fastq.gz", "r2.fastq.gz"],
+        }
+        if extra_cols:
+            data.update(extra_cols)
+        return pl.DataFrame(data)
+
+    def test_global_adapter_fills_absent_column(self):
+        from pydimsum.wrap.trim import _fill_cutadapt_defaults
+        config = self._make_config(cutadapt_5_first="AAAA")
+        df = self._minimal_df()
+        result = _fill_cutadapt_defaults(config, df)
+        assert "cutadapt5First" in result.columns
+        assert result["cutadapt5First"].to_list() == ["AAAA", "AAAA"]
+
+    def test_per_sample_column_not_overridden(self):
+        from pydimsum.wrap.trim import _fill_cutadapt_defaults
+        config = self._make_config(cutadapt_5_first="GLOBAL")
+        # Per-sample column already present — must not be overridden
+        df = self._minimal_df(extra_cols={"cutadapt5First": ["SAMP1", "SAMP2"]})
+        result = _fill_cutadapt_defaults(config, df)
+        assert result["cutadapt5First"].to_list() == ["SAMP1", "SAMP2"]
+
+    def test_none_config_value_fills_null(self):
+        from pydimsum.wrap.trim import _fill_cutadapt_defaults
+        config = self._make_config()  # cutadapt_5_first defaults to None
+        df = self._minimal_df()
+        result = _fill_cutadapt_defaults(config, df)
+        assert "cutadapt5First" in result.columns
+        assert all(v is None for v in result["cutadapt5First"].to_list())
+
+    def test_cut_col_filled_as_int(self):
+        from pydimsum.wrap.trim import _fill_cutadapt_defaults
+        config = self._make_config(cutadapt_cut_5_first=5)
+        df = self._minimal_df()
+        result = _fill_cutadapt_defaults(config, df)
+        assert "cutadaptCut5First" in result.columns
+        assert result["cutadaptCut5First"].to_list() == [5, 5]
+
+    def test_revcomp_3first_from_5second(self):
+        """cutadapt3First should be auto-filled as revcomp(cutadapt5Second)."""
+        from pydimsum.wrap.trim import _fill_cutadapt_defaults
+        config = self._make_config(cutadapt_5_second="AATTCC")
+        df = self._minimal_df()
+        result = _fill_cutadapt_defaults(config, df)
+        # revcomp("AATTCC") = revcomp of AATTCC
+        # complement: TTAAGG, reversed: GGAATT
+        assert result["cutadapt3First"].to_list() == ["GGAATT", "GGAATT"]
+
+    def test_revcomp_3second_from_5first(self):
+        """cutadapt3Second should be auto-filled as revcomp(cutadapt5First)."""
+        from pydimsum.wrap.trim import _fill_cutadapt_defaults
+        config = self._make_config(cutadapt_5_first="GCGCGC")
+        df = self._minimal_df()
+        result = _fill_cutadapt_defaults(config, df)
+        # revcomp("GCGCGC") = GCGCGC (palindrome)
+        assert result["cutadapt3Second"].to_list() == ["GCGCGC", "GCGCGC"]
+
+    def test_explicit_3first_not_overridden_by_revcomp(self):
+        """If cutadapt3First is already set, revcomp auto-fill must not override it."""
+        from pydimsum.wrap.trim import _fill_cutadapt_defaults
+        config = self._make_config(cutadapt_5_second="AATTCC", cutadapt_3_first="EXPLICIT")
+        df = self._minimal_df()
+        result = _fill_cutadapt_defaults(config, df)
+        assert result["cutadapt3First"].to_list() == ["EXPLICIT", "EXPLICIT"]
+
+    def test_revcomp_skipped_for_trans_library(self):
+        """Trans-library mode must not auto-fill rev-comp adapters."""
+        from pydimsum.wrap.trim import _fill_cutadapt_defaults
+        config = self._make_config(cutadapt_5_second="AATTCC", trans_library=True)
+        df = self._minimal_df()
+        result = _fill_cutadapt_defaults(config, df)
+        # cutadapt3First column should be all None (no revcomp applied)
+        assert all(v is None for v in result["cutadapt3First"].to_list())
+
+    def test_stranded_false_requires_paired(self):
+        from pydimsum.config import RunConfig
+        with pytest.raises(ValueError, match="stranded=False requires paired=True"):
+            RunConfig(
+                experiment_design_path=Path(__file__).parent / "data" / "experimentDesign_Toy.txt",
+                wildtype_sequence="ACGT",
+                stranded=False,
+                paired=False,
+            )

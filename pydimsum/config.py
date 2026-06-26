@@ -338,6 +338,11 @@ class RunConfig:
                 "trans_library requires paired=True "
                 "(only paired-end trans libraries are supported)"
             )
+        if not self.stranded and not self.paired:
+            raise ValueError(
+                "stranded=False requires paired=True "
+                "(unstranded read-swap is only supported for paired-end libraries)"
+            )
         if self.max_substitutions < 1:
             raise ValueError("max_substitutions must be >= 1")
         if not (0.0 <= self.barcode_error_rate <= 1.0):

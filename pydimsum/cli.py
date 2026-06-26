@@ -125,6 +125,44 @@ def main(
         3, "--cutadapt_overlap", "--cutadaptOverlap",
         help="Minimum overlap (nt) between a read and the adapter sequence.",
     ),
+    cutadapt_5_first: Optional[str] = typer.Option(
+        None, "--cutadapt_5_first", "--cutadapt5First",
+        help=(
+            "5′ adapter sequence for R1 (global default; per-sample column wins). "
+            "Supports linked adapters: FRONT;optional...BACK;required."
+        ),
+    ),
+    cutadapt_5_second: Optional[str] = typer.Option(
+        None, "--cutadapt_5_second", "--cutadapt5Second",
+        help="5′ adapter sequence for R2 (global default).",
+    ),
+    cutadapt_3_first: Optional[str] = typer.Option(
+        None, "--cutadapt_3_first", "--cutadapt3First",
+        help=(
+            "3′ adapter sequence for R1 (default: revcomp of --cutadapt_5_second). "
+            "Supports linked adapters."
+        ),
+    ),
+    cutadapt_3_second: Optional[str] = typer.Option(
+        None, "--cutadapt_3_second", "--cutadapt3Second",
+        help="3′ adapter sequence for R2 (default: revcomp of --cutadapt_5_first).",
+    ),
+    cutadapt_cut_5_first: Optional[int] = typer.Option(
+        None, "--cutadapt_cut_5_first", "--cutadaptCut5First",
+        help="Remove this many bases from the 5′ end of R1 before adapter trimming.",
+    ),
+    cutadapt_cut_5_second: Optional[int] = typer.Option(
+        None, "--cutadapt_cut_5_second", "--cutadaptCut5Second",
+        help="Remove this many bases from the 5′ end of R2 before adapter trimming.",
+    ),
+    cutadapt_cut_3_first: Optional[int] = typer.Option(
+        None, "--cutadapt_cut_3_first", "--cutadaptCut3First",
+        help="Remove this many bases from the 3′ end of R1 before adapter trimming.",
+    ),
+    cutadapt_cut_3_second: Optional[int] = typer.Option(
+        None, "--cutadapt_cut_3_second", "--cutadaptCut3Second",
+        help="Remove this many bases from the 3′ end of R2 before adapter trimming.",
+    ),
     # ---- Alignment & quality (WRAP stage 3) ----
     vsearch_min_qual: int = typer.Option(
         30, "--vsearch_min_qual", "--vsearchMinQual",
@@ -238,6 +276,14 @@ def main(
             reverse_complement=reverse_complement,
             paired=paired,
             stranded=stranded,
+            cutadapt_5_first=cutadapt_5_first,
+            cutadapt_5_second=cutadapt_5_second,
+            cutadapt_3_first=cutadapt_3_first,
+            cutadapt_3_second=cutadapt_3_second,
+            cutadapt_cut_5_first=cutadapt_cut_5_first,
+            cutadapt_cut_5_second=cutadapt_cut_5_second,
+            cutadapt_cut_3_first=cutadapt_cut_3_first,
+            cutadapt_cut_3_second=cutadapt_cut_3_second,
             cutadapt_min_length=cutadapt_min_length,
             cutadapt_error_rate=cutadapt_error_rate,
             cutadapt_overlap=cutadapt_overlap,

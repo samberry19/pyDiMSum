@@ -20,6 +20,80 @@ from pydimsum.config import RunConfig
 
 logger = logging.getLogger(__name__)
 
+# Complement table for reverse-complement computation
+_COMP = str.maketrans("ACGTacgt", "TGCAtgca")
+
+
+def _revcomp(seq: str) -> str:
+    return seq.translate(_COMP)[::-1]
+
+
+# ---------------------------------------------------------------------------
+# Experiment-design column filling
+# ---------------------------------------------------------------------------
+
+_ADAPTER_COLS = [
+    ("cutadapt_5_first",   "cutadapt5First"),
+    ("cutadapt_5_second",  "cutadapt5Second"),
+    ("cutadapt_3_first",   "cutadapt3First"),
+    ("cutadapt_3_second",  "cutadapt3Second"),
+]
+_CUT_COLS = [
+    ("cutadapt_cut_5_first",  "cutadaptCut5First"),
+    ("cutadapt_cut_5_second", "cutadaptCut5Second"),
+    ("cutadapt_cut_3_first",  "cutadaptCut3First"),
+    ("cutadapt_cut_3_second", "cutadaptCut3Second"),
+]
+
+
+def _fill_cutadapt_defaults(
+    config: RunConfig,
+    exp_design_df: pl.DataFrame,
+) -> pl.DataFrame:
+    """Fill absent cutadapt columns from global config; compute rev-comp fallbacks.
+
+    When a cutadapt adapter column is absent from the experiment design file,
+    fills every row with the global config value (None when config is also unset).
+    Per-sample columns that are already present are left untouched.
+
+    Then, for non-trans libraries, auto-fills:
+      cutadapt3First  = revcomp(cutadapt5Second)  where cutadapt3First  is None
+      cutadapt3Second = revcomp(cutadapt5First)   where cutadapt3Second is None
+
+    Mirrors: R/dimsum__get_experiment_design.R lines 48–67 and 154–161.
+    """
+    for config_field, col_name in _ADAPTER_COLS:
+        if col_name not in exp_design_df.columns:
+            exp_design_df = exp_design_df.with_columns(
+                pl.lit(getattr(config, config_field)).cast(pl.String).alias(col_name)
+            )
+
+    for config_field, col_name in _CUT_COLS:
+        if col_name not in exp_design_df.columns:
+            exp_design_df = exp_design_df.with_columns(
+                pl.lit(getattr(config, config_field)).cast(pl.Int64).alias(col_name)
+            )
+
+    # Rev-comp fallbacks (non-trans library only): use Polars expressions so the
+    # column dtype stays String even when the source column was filled with None.
+    if not config.trans_library:
+        exp_design_df = exp_design_df.with_columns(
+            pl.when(
+                pl.col("cutadapt3First").is_null() & pl.col("cutadapt5Second").is_not_null()
+            )
+            .then(pl.col("cutadapt5Second").map_elements(_revcomp, return_dtype=pl.String))
+            .otherwise(pl.col("cutadapt3First"))
+            .alias("cutadapt3First"),
+            pl.when(
+                pl.col("cutadapt3Second").is_null() & pl.col("cutadapt5First").is_not_null()
+            )
+            .then(pl.col("cutadapt5First").map_elements(_revcomp, return_dtype=pl.String))
+            .otherwise(pl.col("cutadapt3Second"))
+            .alias("cutadapt3Second"),
+        )
+
+    return exp_design_df
+
 
 # ---------------------------------------------------------------------------
 # Public API
@@ -52,6 +126,9 @@ def run_trim(
     """
     outpath.mkdir(parents=True, exist_ok=True)
     logger.info("=== Stage 2 (WRAP): TRIM CONSTANT REGIONS ===")
+
+    # Fill absent cutadapt columns from global config and compute rev-comp fallbacks
+    exp_design_df = _fill_cutadapt_defaults(config, exp_design_df)
 
     # If not trans library: convert linked adapters when both 5' and 3' adapters specified
     if not config.trans_library:
