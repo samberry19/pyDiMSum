@@ -1,6 +1,6 @@
 """pyDiMSum command-line interface.
 
-Maps ~60 DiMSum CLI arguments (DiMSum.R:25-83) to RunConfig and runs the
+Maps DiMSum CLI arguments to RunConfig and runs the
 pipeline.  Uses typer for modern argument handling.
 """
 
@@ -97,6 +97,51 @@ def main(
     mixed_substitutions: bool = typer.Option(False, "--mixed_substitutions", "--mixedSubstitutions"),
     indels: str = typer.Option("none", "--indels"),
     reverse_complement: bool = typer.Option(False, "--reverse_complement", "--reverseComplement"),
+    paired: bool = typer.Option(
+        True, "--paired/--no_paired",
+        help=(
+            "Reads are paired-end (default). Use --no_paired for single-end / "
+            "long-read runs where one read already spans the whole construct "
+            "(skips VSEARCH merging)."
+        ),
+    ),
+    stranded: bool = typer.Option(
+        True, "--stranded/--no_stranded",
+        help=(
+            "Library is stranded (default). Use --no_stranded to swap R1/R2 "
+            "before trimming so that the variable region always appears in R1."
+        ),
+    ),
+    # ---- Adapter trimming (WRAP stage 2) ----
+    cutadapt_min_length: int = typer.Option(
+        50, "--cutadapt_min_length", "--cutadaptMinLength",
+        help="Discard reads shorter than this (nt) after adapter trimming.",
+    ),
+    cutadapt_error_rate: float = typer.Option(
+        0.2, "--cutadapt_error_rate", "--cutadaptErrorRate",
+        help="Maximum error rate (fraction of mismatches) for adapter matching.",
+    ),
+    cutadapt_overlap: int = typer.Option(
+        3, "--cutadapt_overlap", "--cutadaptOverlap",
+        help="Minimum overlap (nt) between a read and the adapter sequence.",
+    ),
+    # ---- Alignment & quality (WRAP stage 3) ----
+    vsearch_min_qual: int = typer.Option(
+        30, "--vsearch_min_qual", "--vsearchMinQual",
+        help="Discard reads where any base has Phred quality below this threshold.",
+    ),
+    vsearch_max_qual: int = typer.Option(
+        41, "--vsearch_max_qual", "--vsearchMaxQual",
+        help="Maximum Phred score expected in input/output FASTQ.",
+    ),
+    vsearch_max_ee: float = typer.Option(
+        0.5, "--vsearch_max_ee", "--vsearchMaxEe",
+        help="Maximum expected errors across the merged read or read pair.",
+    ),
+    vsearch_min_ovlen: int = typer.Option(
+        10, "--vsearch_min_ovlen", "--vsearchMinOvlen",
+        help="Minimum overlap length for paired-end merging.",
+    ),
     # ---- Trans-library (WRAP) ----
     trans_library: bool = typer.Option(
         False, "--trans_library/--no_trans_library", "--transLibrary",
@@ -191,6 +236,15 @@ def main(
             mixed_substitutions=mixed_substitutions,
             indels=indels,
             reverse_complement=reverse_complement,
+            paired=paired,
+            stranded=stranded,
+            cutadapt_min_length=cutadapt_min_length,
+            cutadapt_error_rate=cutadapt_error_rate,
+            cutadapt_overlap=cutadapt_overlap,
+            vsearch_min_qual=vsearch_min_qual,
+            vsearch_max_qual=vsearch_max_qual,
+            vsearch_max_ee=vsearch_max_ee,
+            vsearch_min_ovlen=vsearch_min_ovlen,
             trans_library=trans_library,
             trans_library_reverse_complement=trans_library_reverse_complement,
             fitness_min_input_count_all=fitness_min_input_count_all,

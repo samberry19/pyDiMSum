@@ -703,3 +703,174 @@ class TestTransLibraryConfig:
         )
         assert config.trans_library is False
         assert config.trans_library_reverse_complement is False
+
+
+# ---------------------------------------------------------------------------
+# Single-end mode: config, _filter_reads_se, and _run_single_end
+# ---------------------------------------------------------------------------
+
+
+class TestSingleEndConfig:
+    """paired=False is accepted by RunConfig and is distinct from trans_library."""
+
+    def test_paired_true_by_default(self):
+        from pydimsum.config import RunConfig
+
+        config = RunConfig(
+            experiment_design_path=Path(__file__).parent / "data" / "experimentDesign_Toy.txt",
+            wildtype_sequence="ACGT",
+        )
+        assert config.paired is True
+
+    def test_paired_false_accepted(self):
+        from pydimsum.config import RunConfig
+
+        config = RunConfig(
+            experiment_design_path=Path(__file__).parent / "data" / "experimentDesign_Toy.txt",
+            wildtype_sequence="ACGT",
+            paired=False,
+        )
+        assert config.paired is False
+
+    def test_no_paired_cli_flag(self):
+        """--no_paired CLI flag must parse without error and set paired=False."""
+        from typer.testing import CliRunner
+        from unittest.mock import patch
+        from pydimsum.cli import app
+
+        runner = CliRunner()
+        captured = {}
+
+        def fake_run(cfg):
+            captured["paired"] = cfg.paired
+
+        with patch("pydimsum.pipeline.run_pipeline", fake_run):
+            result = runner.invoke(
+                app,
+                [
+                    "--experiment_design_path",
+                    str(Path(__file__).parent / "data" / "experimentDesign_Toy.txt"),
+                    "--wildtype_sequence", "ACGT",
+                    "--no_paired",
+                    "--start_stage", "5",  # skip all processing stages
+                    "--stop_stage", "5",
+                ],
+            )
+        assert result.exit_code == 0, result.output
+        assert captured.get("paired") is False
+
+
+class TestFilterReadsSe:
+    """Unit tests for the single-end quality filter (_filter_reads_se)."""
+
+    def _write_fastq(self, path: Path, reads: list[tuple[str, str]]) -> None:
+        with gzip.open(path, "wt") as fh:
+            for i, (seq, qual) in enumerate(reads):
+                fh.write(f"@read{i}\n{seq}\n+\n{qual}\n")
+
+    def test_passes_high_quality_reads(self, tmp_path):
+        from pydimsum.wrap.align import _filter_reads_se
+
+        input_fastq = tmp_path / "in.fastq.gz"
+        # Phred 30 = '?'
+        self._write_fastq(input_fastq, [("ACGT", "????"), ("TTTT", "????")])
+
+        output_fastq = tmp_path / "out.fastq.gz"
+        output_report = tmp_path / "report"
+
+        _filter_reads_se(str(input_fastq), output_fastq, output_report, min_qual=30)
+
+        with gzip.open(output_fastq, "rt") as fh:
+            lines = fh.readlines()
+        assert len(lines) == 8  # 2 reads × 4 lines
+
+    def test_discards_low_quality_reads(self, tmp_path):
+        from pydimsum.wrap.align import _filter_reads_se
+
+        input_fastq = tmp_path / "in.fastq.gz"
+        # '#' = Phred 2 (fails min_qual=30), '?' = Phred 30 (passes)
+        self._write_fastq(input_fastq, [("ACGT", "????"), ("TTTT", "#???")])
+
+        output_fastq = tmp_path / "out.fastq.gz"
+        output_report = tmp_path / "report"
+
+        _filter_reads_se(str(input_fastq), output_fastq, output_report, min_qual=30)
+
+        with gzip.open(output_fastq, "rt") as fh:
+            lines = fh.readlines()
+        assert len(lines) == 4  # only the first read survives
+
+    def test_report_written(self, tmp_path):
+        from pydimsum.wrap.align import _filter_reads_se
+
+        input_fastq = tmp_path / "in.fastq.gz"
+        self._write_fastq(input_fastq, [("ACGT", "????")])
+
+        output_fastq = tmp_path / "out.fastq.gz"
+        output_report = tmp_path / "report"
+
+        _filter_reads_se(str(input_fastq), output_fastq, output_report, min_qual=0)
+
+        assert output_report.exists()
+        text = output_report.read_text()
+        assert "Merged" in text
+
+
+class TestRunSingleEnd:
+    """Integration test for _run_single_end via the full align entry point."""
+
+    def _write_fastq(self, path: Path, reads: list[tuple[str, str]]) -> None:
+        with gzip.open(path, "wt") as fh:
+            for i, (seq, qual) in enumerate(reads):
+                fh.write(f"@read{i}\n{seq}\n+\n{qual}\n")
+
+    def test_single_end_produces_output(self, tmp_path):
+        """align_reads with paired=False writes a .vsearch.gz without calling vsearch."""
+        from pydimsum.config import RunConfig
+        from pydimsum.wrap.align import run_align
+
+        # Write a single-end FASTQ (pair1 only)
+        fq_dir = tmp_path / "fastq"
+        fq_dir.mkdir()
+        input_fastq = fq_dir / "sample.fastq.gz"
+        # All Phred 30 reads — should all survive the quality filter
+        self._write_fastq(input_fastq, [("ACGTACGT", "????????"), ("TTTTTTTT", "????????")])
+
+        exp_df = pl.DataFrame({
+            "sample_name": ["sample"],
+            "experiment_replicate": [1],
+            "experiment": [1],
+            "selection_id": [0],
+            "biological_replicate": [1],
+            "selection_replicate": [1],
+            "technical_replicate": [1],
+            "pair_directory": [str(fq_dir)],
+            "pair1": ["sample.fastq.gz"],
+        })
+
+        design_path = tmp_path / "design.tsv"
+        design_path.write_text(
+            "sample_name\texperiment\tselection_id\tbiological_replicate\n"
+            "sample\t1\t0\t1\n"
+        )
+
+        config = RunConfig(
+            experiment_design_path=design_path,
+            wildtype_sequence="ACGTACGT",
+            paired=False,
+        )
+
+        outpath = tmp_path / "aligned"
+        result_df = run_align(config, exp_df, outpath)
+
+        # Output FASTQ must exist and contain the 2 reads (both pass Phred 30 filter)
+        expected_gz = outpath / "sample_e1_s0_b1_t1.vsearch.gz"
+        assert expected_gz.exists(), f"Expected output not found: {expected_gz}"
+
+        with gzip.open(expected_gz, "rt") as fh:
+            lines = [l for l in fh if l.strip()]
+        assert len(lines) == 8  # 2 reads × 4 lines
+
+        # align_reads must return the updated df with aligned_pair columns
+        assert "aligned_pair" in result_df.columns
+        assert "aligned_pair_directory" in result_df.columns
