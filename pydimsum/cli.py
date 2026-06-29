@@ -117,6 +117,10 @@ def main(
         50, "--cutadapt_min_length", "--cutadaptMinLength",
         help="Discard reads shorter than this (nt) after adapter trimming.",
     ),
+    cutadapt_max_length: Optional[int] = typer.Option(
+        None, "--cutadapt_max_length", "--cutadaptMaxLength",
+        help="Discard reads longer than this (nt) after adapter trimming (default: no limit).",
+    ),
     cutadapt_error_rate: float = typer.Option(
         0.2, "--cutadapt_error_rate", "--cutadaptErrorRate",
         help="Maximum error rate (fraction of mismatches) for adapter matching.",
@@ -285,6 +289,7 @@ def main(
             cutadapt_cut_3_first=cutadapt_cut_3_first,
             cutadapt_cut_3_second=cutadapt_cut_3_second,
             cutadapt_min_length=cutadapt_min_length,
+            cutadapt_max_length=cutadapt_max_length,
             cutadapt_error_rate=cutadapt_error_rate,
             cutadapt_overlap=cutadapt_overlap,
             vsearch_min_qual=vsearch_min_qual,

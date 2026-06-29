@@ -319,6 +319,7 @@ def _run_cutadapt_single(
     cut_opts = _get_cut_options(row, paired)
 
     min_len = str(row.get("cutadaptMinLength") or config.cutadapt_min_length)
+    max_len = row.get("cutadaptMaxLength") or config.cutadapt_max_length
     error_rate = str(row.get("cutadaptErrorRate") or config.cutadapt_error_rate)
     overlap = str(row.get("cutadaptOverlap") or config.cutadapt_overlap)
 
@@ -329,6 +330,8 @@ def _run_cutadapt_single(
         + ["--minimum-length", min_len, "-e", error_rate, "-O", overlap,
            "-j", str(config.num_cores)]
     )
+    if max_len is not None:
+        cmd += ["--maximum-length", str(max_len)]
 
     if paired and out2:
         cmd += ["-o", out1, "-p", out2, abs1, abs2 or ""]
