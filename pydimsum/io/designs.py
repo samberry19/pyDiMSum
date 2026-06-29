@@ -46,6 +46,10 @@ class ExperimentDesign:
         import io
         df = pl.read_csv(io.BytesIO(raw), separator="\t", null_values=["", "NA"])
 
+        # Drop empty rows and columns (trailing separators / blank lines)
+        df = df.filter(~pl.all_horizontal(pl.all().is_null()))
+        df = df[[c for c in df.columns if c is not None and c != ""]]
+
         # Remove rows with missing sample_name
         if "sample_name" in df.columns:
             df = df.filter(pl.col("sample_name").is_not_null())

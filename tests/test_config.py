@@ -144,3 +144,58 @@ class TestExperimentDesign:
         design.write_text("\n".join([header] + rows))
         exp = ExperimentDesign(design, allow_pair_duplicates=True)
         assert len(exp.df) == 2
+
+    def test_empty_rows_and_trailing_column_ignored(self, tmp_path):
+        """Empty rows and empty trailing columns must be silently dropped."""
+        from pydimsum.io.designs import ExperimentDesign
+        # Trailing tab produces an empty column; blank lines produce empty rows
+        tsv = (
+            "sample_name\texperiment_replicate\tselection_id\t\n"
+            "input1\t1\t0\t\n"
+            "output1\t1\t1\t\n"
+            "\t\t\t\n"  # empty row
+            "\n"
+        )
+        design = tmp_path / "trailing.tsv"
+        design.write_text(tsv)
+        exp = ExperimentDesign(design)
+        assert len(exp.df) == 2
+        assert "" not in exp.df.columns
+
+
+class TestLoadCountFile:
+    def _make_files(self, tmp_path, counts_content):
+        design_tsv = "sample_name\texperiment_replicate\tselection_id\nsA\t1\t0\nsB\t1\t1\n"
+        design = tmp_path / "design.tsv"
+        design.write_text(design_tsv)
+        counts = tmp_path / "counts.tsv"
+        counts.write_text(counts_content)
+        return design, counts
+
+    def test_empty_rows_and_trailing_column_not_flagged_as_duplicates(self, tmp_path):
+        """Empty rows / trailing columns must not trigger the duplicate nt_seq error."""
+        from pydimsum.io.counts import load_count_file
+        from pydimsum.io.designs import ExperimentDesign
+
+        counts_content = (
+            "nt_seq\tsA\tsB\t\n"
+            "acgt\t10\t20\t\n"
+            "tttt\t5\t15\t\n"
+            "\t\t\t\n"  # empty row
+            "\n"
+        )
+        design, counts = self._make_files(tmp_path, counts_content)
+        exp = ExperimentDesign(design, count_path=counts)
+        df = load_count_file(counts, exp)
+        assert len(df) == 2
+
+    def test_actual_duplicate_nt_seq_still_raises(self, tmp_path):
+        """Real duplicate nt_seq values must still raise ValueError."""
+        from pydimsum.io.counts import load_count_file
+        from pydimsum.io.designs import ExperimentDesign
+
+        counts_content = "nt_seq\tsA\tsB\nacgt\t10\t20\nacgt\t5\t15\n"
+        design, counts = self._make_files(tmp_path, counts_content)
+        exp = ExperimentDesign(design, count_path=counts)
+        with pytest.raises(ValueError, match="Duplicated"):
+            load_count_file(counts, exp)

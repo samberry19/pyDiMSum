@@ -53,6 +53,10 @@ def load_count_file(
         null_values=["", "NA"],
     )
 
+    # Drop empty rows and columns (trailing separators / blank lines)
+    df = df.filter(~pl.all_horizontal(pl.all().is_null()))
+    df = df[[c for c in df.columns if c is not None and c != ""]]
+
     # ---- nt_seq column checks ----
     if "nt_seq" not in df.columns:
         raise ValueError(
