@@ -121,6 +121,16 @@ def main(
         None, "--cutadapt_max_length", "--cutadaptMaxLength",
         help="Discard reads longer than this (nt) after adapter trimming (default: no limit).",
     ),
+    cutadapt_options: Optional[str] = typer.Option(
+        None, "--cutadapt_options", "--cutadaptOptions",
+        help=(
+            "Extra flags forwarded verbatim to cutadapt in the trim stage, "
+            "e.g. \"--discard-untrimmed --max-n 0\". "
+            "Flags already managed by pyDiMSum (adapters, -e, -m/-M, -O, -j, -o/-p) "
+            "are rejected with a clear error. Per-sample override: add a "
+            "'cutadaptOptions' column to the experiment design file."
+        ),
+    ),
     cutadapt_error_rate: float = typer.Option(
         0.2, "--cutadapt_error_rate", "--cutadaptErrorRate",
         help="Maximum error rate (fraction of mismatches) for adapter matching.",
@@ -290,6 +300,7 @@ def main(
             cutadapt_cut_3_second=cutadapt_cut_3_second,
             cutadapt_min_length=cutadapt_min_length,
             cutadapt_max_length=cutadapt_max_length,
+            cutadapt_options=cutadapt_options,
             cutadapt_error_rate=cutadapt_error_rate,
             cutadapt_overlap=cutadapt_overlap,
             vsearch_min_qual=vsearch_min_qual,

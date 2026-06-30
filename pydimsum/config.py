@@ -149,6 +149,7 @@ class RunConfig:
     cutadapt_cut_3_second: int | None = None
     cutadapt_min_length: int = 50
     cutadapt_max_length: int | None = None
+    cutadapt_options: str | None = None
     cutadapt_error_rate: float = 0.2
     cutadapt_overlap: int = 3
 

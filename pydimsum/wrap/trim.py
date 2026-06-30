@@ -10,6 +10,7 @@ Mirrors:
 from __future__ import annotations
 
 import logging
+import shlex
 import shutil
 import subprocess
 from pathlib import Path
@@ -300,6 +301,64 @@ def _get_cut_options(row: dict, paired: bool) -> list[str]:
     return opts
 
 
+# Flags that pyDiMSum manages itself and must not be overridden via the
+# passthrough.  Long-form variants are stored without leading '--' for easy
+# set-membership lookup after stripping.
+_MANAGED_FLAGS: frozenset[str] = frozenset({
+    # Adapter flags
+    "-g", "-G", "-a", "-A",
+    # Fixed-base removal
+    "-u", "-U",
+    # Length filters
+    "-m", "--minimum-length",
+    "-M", "--maximum-length",
+    # Adapter-matching tuning
+    "-e", "--error-rate",
+    "-O", "--overlap",
+    # Parallelism / I/O (always set by pyDiMSum)
+    "-j", "--cores",
+    "-o", "--output",
+    "-p", "--paired-output",
+})
+
+
+def _get_passthrough_options(row: dict, config: RunConfig) -> list[str]:
+    """Return extra cutadapt flags from the per-sample row or global config.
+
+    The raw string is shlex-split and appended after pyDiMSum's own flags in
+    the trim command.  Any flag that pyDiMSum already manages is rejected with
+    a helpful error so the user knows which pydimsum option to use instead.
+    Flags not in the managed set are forwarded as-is; cutadapt itself will
+    error on genuinely unknown flags.
+
+    ``--discard-untrimmed`` is intentionally NOT in the managed set: it is
+    already appended by default in the non-cut-only trim path, is idempotent,
+    and is the primary motivation for this feature (PacBio reads).
+    """
+    raw = row.get("cutadaptOptions") or config.cutadapt_options
+    if not raw:
+        return []
+
+    tokens = shlex.split(raw)
+
+    for token in tokens:
+        if not token.startswith("-"):
+            continue
+        # Strip any attached value (--flag=value or -eVALUE)
+        flag = token.split("=", 1)[0]
+        # For short opts that may have an attached value (-e0.1) keep only -X
+        if len(flag) > 2 and not flag.startswith("--"):
+            flag = flag[:2]
+        if flag in _MANAGED_FLAGS:
+            raise ValueError(
+                f"cutadapt_options contains '{flag}', which is managed by "
+                f"pyDiMSum. Use the corresponding pyDiMSum flag instead "
+                f"(e.g. --cutadapt_error_rate, --cutadapt_min_length)."
+            )
+
+    return tokens
+
+
 def _run_cutadapt_single(
     row: dict,
     abs1: str,
@@ -332,6 +391,8 @@ def _run_cutadapt_single(
     )
     if max_len is not None:
         cmd += ["--maximum-length", str(max_len)]
+
+    cmd += _get_passthrough_options(row, config)
 
     if paired and out2:
         cmd += ["-o", out1, "-p", out2, abs1, abs2 or ""]

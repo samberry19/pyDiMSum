@@ -983,3 +983,100 @@ class TestFillCutadaptDefaults:
                 stranded=False,
                 paired=False,
             )
+
+
+# ---------------------------------------------------------------------------
+# Passthrough cutadapt options
+# ---------------------------------------------------------------------------
+
+
+class TestGetPassthroughOptions:
+    """_get_passthrough_options: shlex-split forwarding with managed-flag guard."""
+
+    def _make_config(self, **kwargs):
+        from pydimsum.config import RunConfig
+        return RunConfig(
+            experiment_design_path=Path(__file__).parent / "data" / "experimentDesign_Toy.txt",
+            wildtype_sequence="ACGT",
+            **kwargs,
+        )
+
+    def test_none_config_returns_empty(self):
+        from pydimsum.wrap.trim import _get_passthrough_options
+        config = self._make_config()  # cutadapt_options defaults to None
+        assert _get_passthrough_options({}, config) == []
+
+    def test_empty_string_returns_empty(self):
+        from pydimsum.wrap.trim import _get_passthrough_options
+        config = self._make_config(cutadapt_options="")
+        assert _get_passthrough_options({}, config) == []
+
+    def test_single_flag(self):
+        from pydimsum.wrap.trim import _get_passthrough_options
+        config = self._make_config(cutadapt_options="--discard-untrimmed")
+        assert _get_passthrough_options({}, config) == ["--discard-untrimmed"]
+
+    def test_multiple_flags_split_correctly(self):
+        from pydimsum.wrap.trim import _get_passthrough_options
+        config = self._make_config(cutadapt_options="--discard-untrimmed --max-n 0")
+        assert _get_passthrough_options({}, config) == [
+            "--discard-untrimmed", "--max-n", "0"
+        ]
+
+    def test_per_sample_row_overrides_global_config(self):
+        from pydimsum.wrap.trim import _get_passthrough_options
+        config = self._make_config(cutadapt_options="--discard-untrimmed")
+        row = {"cutadaptOptions": "--max-n 1"}
+        assert _get_passthrough_options(row, config) == ["--max-n", "1"]
+
+    def test_discard_untrimmed_is_allowed(self):
+        """--discard-untrimmed must not raise (PacBio use-case, idempotent)."""
+        from pydimsum.wrap.trim import _get_passthrough_options
+        config = self._make_config(cutadapt_options="--discard-untrimmed")
+        result = _get_passthrough_options({}, config)
+        assert "--discard-untrimmed" in result
+
+    # ---- managed-flag guard ----
+
+    def test_managed_short_error_rate_raises(self):
+        from pydimsum.wrap.trim import _get_passthrough_options
+        config = self._make_config(cutadapt_options="-e 0.1")
+        with pytest.raises(ValueError, match="managed by pyDiMSum"):
+            _get_passthrough_options({}, config)
+
+    def test_managed_long_error_rate_raises(self):
+        from pydimsum.wrap.trim import _get_passthrough_options
+        config = self._make_config(cutadapt_options="--error-rate 0.1")
+        with pytest.raises(ValueError, match="managed by pyDiMSum"):
+            _get_passthrough_options({}, config)
+
+    def test_managed_long_equals_form_raises(self):
+        from pydimsum.wrap.trim import _get_passthrough_options
+        config = self._make_config(cutadapt_options="--error-rate=0.1")
+        with pytest.raises(ValueError, match="managed by pyDiMSum"):
+            _get_passthrough_options({}, config)
+
+    def test_managed_short_attached_value_raises(self):
+        """e.g. -e0.1 (value attached directly to short flag)."""
+        from pydimsum.wrap.trim import _get_passthrough_options
+        config = self._make_config(cutadapt_options="-e0.1")
+        with pytest.raises(ValueError, match="managed by pyDiMSum"):
+            _get_passthrough_options({}, config)
+
+    def test_managed_minimum_length_raises(self):
+        from pydimsum.wrap.trim import _get_passthrough_options
+        config = self._make_config(cutadapt_options="--minimum-length 10")
+        with pytest.raises(ValueError, match="managed by pyDiMSum"):
+            _get_passthrough_options({}, config)
+
+    def test_managed_adapter_flag_raises(self):
+        from pydimsum.wrap.trim import _get_passthrough_options
+        config = self._make_config(cutadapt_options="-g ATCG")
+        with pytest.raises(ValueError, match="managed by pyDiMSum"):
+            _get_passthrough_options({}, config)
+
+    def test_managed_output_flag_raises(self):
+        from pydimsum.wrap.trim import _get_passthrough_options
+        config = self._make_config(cutadapt_options="-o out.fq")
+        with pytest.raises(ValueError, match="managed by pyDiMSum"):
+            _get_passthrough_options({}, config)

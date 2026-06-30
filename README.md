@@ -468,8 +468,10 @@ These options are passed to [cutadapt](https://cutadapt.readthedocs.io/). All ca
 | `--cutadapt_cut_3_first` | — | Remove this many bases from the 3′ end of R1 before trimming. |
 | `--cutadapt_cut_3_second` | — | Remove this many bases from the 3′ end of R2 before trimming. |
 | `--cutadapt_min_length` | `50` | Discard reads shorter than this (nt) after trimming. |
+| `--cutadapt_max_length` | — | Discard reads longer than this (nt) after trimming (default: no limit). |
 | `--cutadapt_error_rate` | `0.2` | Maximum error rate (fraction of mismatches) for adapter matching. |
 | `--cutadapt_overlap` | `3` | Minimum overlap (nt) between a read and the adapter sequence. |
+| `--cutadapt_options` | — | Extra flags forwarded verbatim to cutadapt, e.g. `"--discard-untrimmed --max-n 0"`. Useful for non-standard read chemistries (e.g. PacBio). Flags already managed by pyDiMSum (adapters, `-e`, `-m`/`-M`, `-O`, `-j`, `-o`/`-p`) are rejected with a clear error. A `cutadaptOptions` column in the experiment design file allows per-sample overrides. |
 
 ---
 
