@@ -221,14 +221,15 @@ def process_variants(
             )[0]
             # New nt_seq (variable only)
             new_nt_seqs = [decode_row(mat_var[i]) for i in range(len(mat_var))]
+            # Recompute WT aa from variable positions before translating variants
+            wt_var_aa = translate_sequences_fast([decode_row(wt_mat_var)])[0]
+            wt_aa_arr = np.frombuffer(wt_var_aa.encode("ascii"), dtype=np.uint8)
+            wt_has_term_stop = wt_var_aa.endswith("*")
             # Retranslate
             new_aa_seqs = translate_sequences_fast(new_nt_seqs)
             new_aa_mat = encode(new_aa_seqs) if new_aa_seqs else np.empty((0, len(wt_aa_arr)), dtype=np.uint8)
             new_nham_nt = hamming(mat_var, wt_mat_var)
             new_nham_aa = hamming(new_aa_mat, wt_aa_arr) if len(new_aa_seqs) else np.empty(0, np.int32)
-            # Update wt_has_term_stop using stripped WT
-            wt_var_aa = translate_sequences_fast([decode_row(wt_mat_var)])[0]
-            wt_has_term_stop = wt_var_aa.endswith("*")
             new_stop, new_rt = detect_stop(new_aa_mat, wt_has_term_stop) if len(new_aa_seqs) else (
                 np.empty(0, dtype=bool), np.empty(0, dtype=bool)
             )
@@ -246,7 +247,6 @@ def process_variants(
             # Update mat and wt for subsequent steps
             mat = mat_var
             wt_arr = wt_mat_var
-            wt_aa_arr = np.frombuffer(wt_var_aa.encode("ascii"), dtype=np.uint8)
     else:
         subst_df = subst_df.with_columns(pl.lit(True).alias("constant_region"))
 
