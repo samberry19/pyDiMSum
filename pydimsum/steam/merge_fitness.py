@@ -359,9 +359,16 @@ def _write_table(df: pl.DataFrame, path: Path) -> None:
 
 
 def _write_parquet_bundle(tables: dict[str, pl.DataFrame], path: Path) -> None:
-    """Write all result DataFrames to a single Parquet bundle directory."""
+    """Write all result DataFrames to a Parquet + CSV bundle directory.
+
+    Each table is written as both ``{name}.parquet`` and ``{name}.csv`` with
+    identical columns/rows, so downstream tools that can't read Parquet have
+    a CSV with the exact same content (unlike e.g. fitness_singles_MaveDB.csv,
+    which is a reduced subset of the singles table).
+    """
     bundle_dir = path.with_suffix("")
     bundle_dir.mkdir(parents=True, exist_ok=True)
     for name, df in tables.items():
         if df is not None and len(df) > 0:
             df.write_parquet(str(bundle_dir / f"{name}.parquet"))
+            df.write_csv(str(bundle_dir / f"{name}.csv"), separator=",", null_value="NA")

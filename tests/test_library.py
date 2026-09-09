@@ -435,6 +435,16 @@ class TestWriteEnrichmentOutputs:
         df = pl.read_parquet(str(parquet_path))
         assert len(df) == 3
 
+    def test_bundle_csv_matches_parquet(self, tmp_path):
+        cfg = self._run_enrichment(tmp_path)
+        bundle_dir = cfg.project_path / "test_enrichment_enrichment"
+        parquet_df = pl.read_parquet(str(bundle_dir / "variants.parquet"))
+        csv_path = bundle_dir / "variants.csv"
+        assert csv_path.exists(), "CSV counterpart for variants.parquet not created"
+        csv_df = pl.read_csv(str(csv_path), null_values="NA", infer_schema_length=None)
+        assert csv_df.columns == parquet_df.columns
+        assert len(csv_df) == len(parquet_df)
+
     def test_single_replicate_works(self, tmp_path):
         cfg = self._run_enrichment(tmp_path, n_reps=1)
         tsv = cfg.project_path / "enrichment_variant_data.txt"

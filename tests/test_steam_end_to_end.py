@@ -258,3 +258,21 @@ class TestParquetBundle:
         assert len(df) > 0
         assert "fitness" in df.columns
         assert "sigma" in df.columns
+
+    def test_bundle_csv_matches_parquet(self, pipeline_output):
+        bundle_dir = pipeline_output / "PyDiMSum_e2e_fitness_replicates"
+        parquet_files = list(bundle_dir.glob("*.parquet"))
+        assert len(parquet_files) >= 2
+
+        for parquet_path in parquet_files:
+            csv_path = parquet_path.with_suffix(".csv")
+            assert csv_path.exists(), f"Missing CSV counterpart for {parquet_path.name}"
+
+            parquet_df = pl.read_parquet(str(parquet_path))
+            csv_df = pl.read_csv(str(csv_path), null_values="NA", infer_schema_length=None)
+
+            assert csv_df.columns == parquet_df.columns, (
+                f"Column mismatch for {parquet_path.stem}: "
+                f"parquet={parquet_df.columns} csv={csv_df.columns}"
+            )
+            assert len(csv_df) == len(parquet_df)

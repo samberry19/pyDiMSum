@@ -561,7 +561,7 @@ All files are written to `{output_path}/{project_name}/`.
 | `fitness_wildtype.txt` | WT variant fitness values across replicates. |
 | `fitness_synonymous.txt` | Synonymous variant fitness scores (coding sequences only). |
 | `fitness_singles_MaveDB.csv` | [MaveDB](https://www.mavedb.org/)-compatible CSV for data deposition. |
-| `*_fitness_replicates/` | Parquet bundle: `all_variants.parquet`, `singles.parquet`, `doubles.parquet`, `synonymous.parquet`, `wildtype.parquet`. Loadable in Python (`polars.read_parquet`) or R (`arrow::read_parquet`). |
+| `*_fitness_replicates/` | Parquet + CSV bundle: `all_variants.{parquet,csv}`, `singles.{parquet,csv}`, `doubles.{parquet,csv}`, `synonymous.{parquet,csv}`, `wildtype.{parquet,csv}`. Each `.csv` has the exact same columns/rows as its `.parquet` counterpart (a superset of `fitness_singles_MaveDB.csv`, which only keeps `hgvs_pro`/`score`/`se`). Parquet is loadable in Python (`polars.read_parquet`) or R (`arrow::read_parquet`). |
 | `*_report.html` | Self-contained HTML report with diagnostic plots (requires matplotlib + jinja2). |
 
 **Enrichment mode outputs:**
@@ -569,7 +569,7 @@ All files are written to `{output_path}/{project_name}/`.
 | File | Description |
 |------|-------------|
 | `enrichment_variant_data.txt` | Per-sequence enrichment scores and errors. |
-| `*_enrichment.parquet/` | Parquet bundle with the enrichment table. |
+| `*_enrichment.parquet/` | Parquet + CSV bundle: `variants.parquet` and `variants.csv` (identical columns/rows). |
 
 **Intermediate files (always written):**
 
