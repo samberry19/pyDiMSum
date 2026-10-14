@@ -45,8 +45,15 @@ def main(
         "--wildtype_sequence", "--wildtypeSequence",
         help=(
             "WT nucleotide sequence. Upper-case = variable, lower-case = constant region. "
+            "Several WTs may be given comma-separated; the first is the primary WT "
+            "(fitness reference) and each variant is assigned to its nearest WT. "
             "Required in mutation mode; optional when --enrichment_mode is set."
         ),
+    ),
+    wildtype_names: Optional[str] = typer.Option(
+        None,
+        "--wildtype_names", "--wildtypeNames",
+        help="Comma-separated names for multiple WTs (default: WT1,WT2,...).",
     ),
     # ---- Input / output ----
     output_path: Path = typer.Option(
@@ -270,6 +277,7 @@ def main(
         config = RunConfig(
             experiment_design_path=experiment_design_path,
             wildtype_sequence=wildtype_sequence or "",
+            wildtype_names=wildtype_names,
             output_path=output_path,
             project_name=project_name,
             count_path=count_path,

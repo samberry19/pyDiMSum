@@ -52,6 +52,7 @@
       <tr><th>Samples (count cols)</th><td>{{ n_count_cols }}</td></tr>
       <tr><th>Sequence type</th><td>{{ sequence_type }}</td></tr>
       {% if wt_seq %}<tr><th>WT sequence (nt)</th><td><code style="word-break:break-all">{{ wt_seq[:60] }}{% if wt_seq|length > 60 %}…{% endif %}</code> ({{ wt_seq|length }} nt)</td></tr>{% endif %}
+      {% for name, seq in extra_wts|default([]) %}<tr><th>WT {{ name }} (nt)</th><td><code style="word-break:break-all">{{ seq[:60] }}{% if seq|length > 60 %}…{% endif %}</code> ({{ seq|length }} nt)</td></tr>{% endfor %}
       <tr><th>Total input variants</th><td>{{ n_input_variants }}</td></tr>
       <tr><th>Retained variants</th><td>{{ n_retained_variants }}</td></tr>
     </table>

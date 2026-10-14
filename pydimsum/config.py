@@ -53,6 +53,30 @@ def _parse_min_count_arg(value: str) -> Union[int, dict]:
 
 
 @dataclass
+class WTEntry:
+    """One wildtype reference (mutation mode)."""
+
+    name: str
+    coded_seq: str
+    """Case-coded sequence: upper = variable, lower = internal constant region."""
+    permitted: str = ""
+    """IUPAC string over the variable positions only."""
+
+    @property
+    def seq(self) -> str:
+        """Lower-cased full sequence (variable + constant)."""
+        return self.coded_seq.lower()
+
+    @property
+    def variable_seq(self) -> str:
+        return "".join(b for b in self.coded_seq if b in _NT_UPPER)
+
+    @property
+    def has_constant_region(self) -> bool:
+        return any(b in _NT_LOWER for b in self.coded_seq)
+
+
+@dataclass
 class RunConfig:
     """Validated pipeline configuration.
 
@@ -67,7 +91,12 @@ class RunConfig:
     wildtype_sequence: str = ""
     """WT nucleotide sequence (A/C/G/T upper-case = variable,
     lower-case = internal constant region to remove).
-    Required in mutation mode; optional (defaults to "") in enrichment_mode."""
+    Required in mutation mode; optional (defaults to "") in enrichment_mode.
+    May be a comma-separated list of several WTs; the first is the primary WT
+    (fitness reference).  After validation this holds the primary WT only."""
+
+    wildtype_names: str | None = None
+    """Optional comma-separated names for the WTs (default WT1, WT2, ...)."""
 
     # ---- Input / output ----
     output_path: Path = field(default_factory=lambda: Path("."))
@@ -160,6 +189,7 @@ class RunConfig:
     vsearch_min_ovlen: int = 10
 
     # ---- Internal (derived after validation) ----
+    wildtypes: list[WTEntry] = field(default_factory=list, init=False, repr=False)
     _sequence_type_resolved: str = field(default="", init=False, repr=False)
     _wt_seq_upper: str = field(default="", init=False, repr=False)
     """WT sequence with constant-region bases still lower-case."""
@@ -222,18 +252,32 @@ class RunConfig:
     def _validate_wt_sequence(self) -> None:
         if not self.wildtype_sequence and not self.enrichment_mode:
             raise ValueError("wildtypeSequence is required")
-        if not set(self.wildtype_sequence).issubset(_NT_MIXED):
-            invalid = set(self.wildtype_sequence) - _NT_MIXED
-            raise ValueError(
-                f"wildtypeSequence contains invalid characters: {invalid}. "
-                "Only A/C/G/T (variable) and a/c/g/t (constant) are allowed."
-            )
-        # Store case-coded (as given) and upper-case versions
+        seqs = [x.strip() for x in self.wildtype_sequence.split(",")]
+        for sq in seqs:
+            if not sq or not set(sq).issubset(_NT_MIXED):
+                invalid = set(sq) - _NT_MIXED or {"<empty>"}
+                raise ValueError(
+                    f"wildtypeSequence contains invalid characters: {invalid}. "
+                    "Only A/C/G/T (variable) and a/c/g/t (constant) are allowed."
+                )
+        if len({s_.lower() for s_ in seqs}) != len(seqs):
+            raise ValueError("wildtypeSequence contains duplicate sequences")
+        if self.wildtype_names:
+            names = [x.strip() for x in self.wildtype_names.split(",")]
+            if len(names) != len(seqs):
+                raise ValueError(
+                    f"wildtypeNames has {len(names)} entries but "
+                    f"{len(seqs)} wildtype sequences were given"
+                )
+        else:
+            names = [f"WT{i + 1}" for i in range(len(seqs))]
+        if len(set(names)) != len(names) or not all(names):
+            raise ValueError("wildtypeNames must be unique and non-empty")
+        self.wildtypes = [WTEntry(n, sq) for n, sq in zip(names, seqs)]
+        # Primary WT drives the single-WT convenience fields
+        self.wildtype_sequence = self.wildtypes[0].coded_seq
         self._wt_seq_upper = self.wildtype_sequence  # keep case
-        # Variable positions only (upper-case)
-        self._wt_seq_variable = "".join(
-            b for b in self.wildtype_sequence if b in _NT_UPPER
-        )
+        self._wt_seq_variable = self.wildtypes[0].variable_seq
 
     def _validate_enrichment_mode(self) -> None:
         """Validate enrichment-mode-specific config and set derived fields."""
@@ -267,43 +311,62 @@ class RunConfig:
                 f"got {self.sequence_type!r}"
             )
         if self.sequence_type == "auto":
-            # Detect: try translating the lower-cased WT sequence; if it
-            # produces no premature STOP → coding.
+            # Detect per WT: try translating the lower-cased WT sequence; if it
+            # produces no premature STOP -> coding.
             from Bio.Seq import Seq
 
-            nt = self.wildtype_sequence.lower()
-            if len(nt) % 3 == 0:
-                prot = str(Seq(nt).translate())
-                # premature stop = stop before the last position
-                has_premature_stop = "*" in prot[:-1]
-                self._sequence_type_resolved = (
-                    "noncoding" if has_premature_stop else "coding"
+            resolved = set()
+            for wt in self.wildtypes:
+                nt = wt.seq
+                if len(nt) % 3 == 0:
+                    prot = str(Seq(nt).translate())
+                    # premature stop = stop before the last position
+                    resolved.add("noncoding" if "*" in prot[:-1] else "coding")
+                else:
+                    resolved.add("noncoding")
+            if len(resolved) > 1:
+                raise ValueError(
+                    "Wildtype sequences resolve to different sequence types "
+                    "(coding and noncoding); set sequence_type explicitly."
                 )
-            else:
-                self._sequence_type_resolved = "noncoding"
+            self._sequence_type_resolved = resolved.pop()
         else:
             self._sequence_type_resolved = self.sequence_type
 
     def _validate_permitted_sequences(self) -> None:
-        # Count variable positions in WT
-        n_variable = sum(1 for b in self.wildtype_sequence if b in _NT_UPPER)
-        if self.permitted_sequences is None:
-            # Default: all substitutions at every variable position
-            self.permitted_sequences = "N" * n_variable
+        raw = self.permitted_sequences
+        if raw is None:
+            parts: list[str | None] = [None] * len(self.wildtypes)
         else:
-            ps = self.permitted_sequences.upper()
+            parts = [x.strip() for x in raw.split(",")]
+            if len(parts) == 1 and len(self.wildtypes) > 1:
+                parts = parts * len(self.wildtypes)
+            if len(parts) != len(self.wildtypes):
+                raise ValueError(
+                    f"permittedSequences has {len(parts)} entries but "
+                    f"{len(self.wildtypes)} wildtype sequences were given"
+                )
+        for wt, ps in zip(self.wildtypes, parts):
+            n_variable = len(wt.variable_seq)
+            if ps is None:
+                # Default: all substitutions at every variable position
+                wt.permitted = "N" * n_variable
+                continue
+            ps = ps.upper()
             if len(ps) != n_variable:
                 raise ValueError(
                     f"permittedSequences length ({len(ps)}) must equal "
                     f"the number of variable (upper-case) positions in "
-                    f"wildtypeSequence ({n_variable})"
+                    f"wildtypeSequence {wt.name} ({n_variable})"
                 )
             if not set(ps).issubset(_IUPAC_UPPER):
                 invalid = set(ps) - _IUPAC_UPPER
                 raise ValueError(
                     f"permittedSequences contains invalid IUPAC characters: {invalid}"
                 )
-            self.permitted_sequences = ps
+            wt.permitted = ps
+        # Primary WT's permitted string drives the single-WT convenience field
+        self.permitted_sequences = self.wildtypes[0].permitted
 
     def _validate_indels(self) -> None:
         indels = self.indels.strip().lower()

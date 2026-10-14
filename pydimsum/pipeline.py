@@ -345,6 +345,7 @@ def _run_steam(
 
         # Save for stage 5
         _variant_data = retained
+        _wt_refs = processed.wt_refs if len(config.wildtypes) > 1 else None
     else:
         # Load from previous run (not yet implemented)
         raise NotImplementedError("Resuming from stage 5 without stage 4 data not yet supported.")
@@ -374,7 +375,10 @@ def _run_steam(
 
     # ---- AA aggregation (mixedSubstitutions + coding) ----
     if seq_type == "coding" and config.mixed_substitutions:
-        nf_data = aggregate_aa_variants(nf_data, replicates, synonym_sequences)
+        nf_data = aggregate_aa_variants(
+            nf_data, replicates, synonym_sequences,
+            primary_wt_id=config.wildtypes[0].name if _wt_refs else None,
+        )
     else:
         nf_data = nf_data.with_columns(pl.col("nt_seq").alias("merge_seq"))
 
@@ -421,6 +425,7 @@ def _run_steam(
         sequence_type=seq_type,
         wt_nt_seq=wt_nt_seq,
         wt_aa_seq=wt_aa_seq,
+        wt_refs=_wt_refs,
     )
     doubles_df = identify_doubles(
         df=nff_data.filter(pl.col("error_model").fill_null(True)),
@@ -428,6 +433,7 @@ def _run_steam(
         sequence_type=seq_type,
         wt_nt_seq=wt_nt_seq,
         wt_aa_seq=wt_aa_seq,
+        wt_refs=_wt_refs,
     )
 
     logger.info(

@@ -129,12 +129,16 @@ def merge_fitness(
         synonymous_df = pl.DataFrame()
 
     # ---- Wildtype ----
-    wildtype_df = all_data_df.filter(pl.col("WT").fill_null(False))
+    # With several WTs, WT is the primary only; WT_ref marks every WT's own sequence
+    wt_expr = pl.col("WT").fill_null(False)
+    if "WT_ref" in all_data_df.columns:
+        wt_expr = wt_expr | pl.col("WT_ref").fill_null(False)
+    wildtype_df = all_data_df.filter(wt_expr)
 
     # ---- Remove synonymous WT from all_variants for coding ----
     if sequence_type == "coding":
         all_data_df = all_data_df.filter(
-            pl.col("WT").fill_null(False) |
+            wt_expr |
             (pl.col("Nham_aa").fill_null(0) > 0) |
             pl.col("indel").fill_null(False)
         )
@@ -234,18 +238,20 @@ def _join_singles_to_doubles(
     if "fitness" not in singles_df.columns or "sigma" not in singles_df.columns:
         return doubles_df
 
-    s_lookup = singles_df.select(["Pos", "Mut", "fitness", "sigma"])
+    # With several WTs, positions are only comparable within the same WT
+    wt_key = ["WT_id"] if ("WT_id" in singles_df.columns and "WT_id" in doubles_df.columns) else []
+    s_lookup = singles_df.select(wt_key + ["Pos", "Mut", "fitness", "sigma"])
 
     doubles_df = doubles_df.join(
         s_lookup.rename({"Pos": "Pos1", "Mut": "Mut1",
                           "fitness": "fitness1", "sigma": "sigma1"}),
-        on=["Pos1", "Mut1"],
+        on=wt_key + ["Pos1", "Mut1"],
         how="left",
     )
     doubles_df = doubles_df.join(
         s_lookup.rename({"Pos": "Pos2", "Mut": "Mut2",
                           "fitness": "fitness2", "sigma": "sigma2"}),
-        on=["Pos2", "Mut2"],
+        on=wt_key + ["Pos2", "Mut2"],
         how="left",
     )
     return doubles_df
@@ -264,7 +270,7 @@ def _finalise_singles(
         if "Nham_aa" in singles_df.columns:
             singles_df = singles_df.filter(pl.col("Nham_aa") == 1)
         keep = [
-            "Pos", "WT_AA", "Mut", "nt_seq", "aa_seq",
+            "WT_id", "Pos", "WT_AA", "Mut", "nt_seq", "aa_seq",
             "Nham_nt", "Nham_aa", "Nmut_codons", "STOP", "STOP_readthrough",
             "mean_count", "fitness", "sigma",
         ]
@@ -281,10 +287,12 @@ def _finalise_singles(
                 "score": out["fitness"].to_list(),
                 "se": out["sigma"].to_list(),
             })
+            if "WT_id" in out.columns:
+                mavedb = mavedb.with_columns(out["WT_id"].alias("WT_id"))
         else:
             mavedb = None
     else:
-        keep = ["Pos", "WT_AA", "Mut", "nt_seq", "Nham_nt", "mean_count", "fitness", "sigma"]
+        keep = ["WT_id", "Pos", "WT_AA", "Mut", "nt_seq", "Nham_nt", "mean_count", "fitness", "sigma"]
         out = singles_df.select([c for c in keep if c in singles_df.columns])
         # Rename WT_AA → WT_nt for noncoding
         if "WT_AA" in out.columns:
@@ -301,6 +309,8 @@ def _finalise_singles(
                 "score": out["fitness"].to_list(),
                 "se": out["sigma"].to_list(),
             })
+            if "WT_id" in out.columns:
+                mavedb = mavedb.with_columns(out["WT_id"].alias("WT_id"))
         else:
             mavedb = None
 
@@ -317,7 +327,7 @@ def _finalise_doubles(
 
     if sequence_type == "coding":
         keep = [
-            "Pos1", "Pos2", "WT_AA1", "WT_AA2", "Mut1", "Mut2",
+            "WT_id", "Pos1", "Pos2", "WT_AA1", "WT_AA2", "Mut1", "Mut2",
             "nt_seq", "aa_seq", "Nham_nt", "Nham_aa", "Nmut_codons",
             "STOP", "STOP_readthrough", "mean_count",
             "fitness1", "sigma1", "fitness2", "sigma2",
@@ -325,7 +335,7 @@ def _finalise_doubles(
         ]
     else:
         keep = [
-            "Pos1", "Pos2", "WT_AA1", "WT_AA2", "Mut1", "Mut2",
+            "WT_id", "Pos1", "Pos2", "WT_AA1", "WT_AA2", "Mut1", "Mut2",
             "nt_seq", "Nham_nt", "mean_count",
             "fitness1", "sigma1", "fitness2", "sigma2",
             "fitness_uncorr", "sigma_uncorr",

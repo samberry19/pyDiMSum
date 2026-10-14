@@ -31,8 +31,12 @@ def identify_singles(
     sequence_type: str,
     wt_nt_seq: str,
     wt_aa_seq: str,
+    wt_refs: dict[str, tuple[str, str]] | None = None,
 ) -> pl.DataFrame:
     """Return a DataFrame of single-mutant variants with mutation annotations.
+
+    If ``wt_refs`` (WT name -> (nt, aa)) is given and ``df`` has a ``WT_id``
+    column, each WT's variants are annotated against their own WT sequence.
 
     For coding sequences: annotates on AA level (Nham_aa == 1).
     For noncoding: annotates on NT level (Nham_nt == 1).
@@ -44,6 +48,13 @@ def identify_singles(
       dimsum__identify_single_aa_mutations.R
       dimsum__identify_single_nt_mutations.R
     """
+    if wt_refs and "WT_id" in df.columns:
+        parts = [
+            identify_singles(group, sequence_type, nt, aa)
+            for name, group in _partition_by_wt(df, wt_refs)
+            for nt, aa in [wt_refs[name]]
+        ]
+        return _concat_nonempty(parts)
     if sequence_type == "coding":
         return _singles_aa(df, wt_aa_seq)
     else:
@@ -56,8 +67,11 @@ def identify_doubles(
     sequence_type: str,
     wt_nt_seq: str,
     wt_aa_seq: str,
+    wt_refs: dict[str, tuple[str, str]] | None = None,
 ) -> pl.DataFrame:
     """Return a DataFrame of double-mutant variants with mutation annotations.
+
+    ``wt_refs`` behaves as in :func:`identify_singles`.
 
     Columns added: Pos1, Pos2, WT_AA1/WT_AA2 (or WT_nt1/WT_nt2), Mut1, Mut2,
     s1_mean_count, s2_mean_count.
@@ -66,6 +80,13 @@ def identify_doubles(
       dimsum__identify_double_aa_mutations.R
       dimsum__identify_double_nt_mutations.R
     """
+    if wt_refs and "WT_id" in df.columns:
+        parts = [
+            identify_doubles(group, singles_df, sequence_type, nt, aa)
+            for name, group in _partition_by_wt(df, wt_refs)
+            for nt, aa in [wt_refs[name]]
+        ]
+        return _concat_nonempty(parts)
     if sequence_type == "coding":
         return _doubles_aa(df, singles_df, wt_aa_seq)
     else:
@@ -214,6 +235,21 @@ def _doubles_nt(
 # Helpers
 # ---------------------------------------------------------------------------
 
+def _partition_by_wt(df: pl.DataFrame, wt_refs: dict[str, tuple[str, str]]):
+    """Yield (WT name, rows) for each WT present in ``df`` (retained indels have no WT_id)."""
+    for name in wt_refs:
+        group = df.filter(pl.col("WT_id") == name)
+        if len(group):
+            yield name, group
+
+
+def _concat_nonempty(parts: list[pl.DataFrame]) -> pl.DataFrame:
+    parts = [p for p in parts if p is not None and len(p)]
+    if not parts:
+        return pl.DataFrame()
+    return pl.concat(parts, how="diagonal_relaxed")
+
+
 def _join_singles_mean_count(
     doubles: pl.DataFrame,
     singles_df: pl.DataFrame,
@@ -233,18 +269,20 @@ def _join_singles_mean_count(
         ])
         return doubles
 
-    s_lookup = singles_df.select(["Pos", "Mut", "mean_count"])
+    # With several WTs, positions are only comparable within the same WT
+    wt_key = ["WT_id"] if ("WT_id" in singles_df.columns and "WT_id" in doubles.columns) else []
+    s_lookup = singles_df.select(wt_key + ["Pos", "Mut", "mean_count"])
 
     # Join for position 1
     doubles = doubles.join(
         s_lookup.rename({"Pos": "Pos1", "Mut": "Mut1", "mean_count": "s1_mean_count"}),
-        on=["Pos1", "Mut1"],
+        on=wt_key + ["Pos1", "Mut1"],
         how="left",
     )
     # Join for position 2
     doubles = doubles.join(
         s_lookup.rename({"Pos": "Pos2", "Mut": "Mut2", "mean_count": "s2_mean_count"}),
-        on=["Pos2", "Mut2"],
+        on=wt_key + ["Pos2", "Mut2"],
         how="left",
     )
     return doubles

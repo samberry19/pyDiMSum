@@ -18,8 +18,12 @@ def aggregate_aa_variants(
     df: pl.DataFrame,
     replicates: list[int],
     synonym_sequences: list[str] | None = None,
+    primary_wt_id: str | None = None,
 ) -> pl.DataFrame:
     """Aggregate variant counts to the amino acid level.
+
+    ``primary_wt_id`` is the name of the primary WT when several WTs were given
+    (only its AA sequence is flagged ``WT``; the others keep ``WT_ref``).
 
     Called when ``sequence_type == 'coding'`` and ``mixed_substitutions == True``.
 
@@ -37,7 +41,11 @@ def aggregate_aa_variants(
     df = df.with_columns(pl.col("aa_seq").alias("merge_seq"))
 
     # Reference AA sequences for synonymous variants
-    wt_aa = df.filter(pl.col("WT"))["aa_seq"].to_list()
+    # (WT_ref marks every WT's own sequence when several WTs were given)
+    wt_aa = df.filter(
+        pl.col("WT") | pl.col("WT_ref").fill_null(False)
+        if "WT_ref" in df.columns else pl.col("WT")
+    )["aa_seq"].to_list()
     if wt_aa:
         synseq_refs = set(wt_aa)
     else:
@@ -71,6 +79,7 @@ def aggregate_aa_variants(
     meta_cols = [
         "merge_seq", "nt_seq", "aa_seq", "Nham_nt", "Nham_aa",
         "Nmut_codons", "WT", "indel", "STOP", "STOP_readthrough", "error_model",
+        "WT_id", "WT_ref",
     ]
     present_meta = [c for c in meta_cols if c in df.columns]
 
@@ -81,9 +90,18 @@ def aggregate_aa_variants(
     )
 
     # AA-level WT: Nham_aa == 0
-    output_df = output_df.with_columns(
-        pl.when(pl.col("Nham_aa") == 0).then(True).otherwise(pl.col("WT")).alias("WT")
-    )
+    # (With several WTs, only the primary WT's AA sequence is "WT"; the others
+    # are flagged via WT_ref.)
+    if "WT_id" in output_df.columns and primary_wt_id is not None:
+        output_df = output_df.with_columns(
+            pl.when(pl.col("Nham_aa") == 0).then(True).otherwise(pl.col("WT_ref")).alias("WT_ref"),
+            pl.when((pl.col("Nham_aa") == 0) & (pl.col("WT_id") == primary_wt_id))
+            .then(True).otherwise(pl.col("WT")).alias("WT"),
+        )
+    else:
+        output_df = output_df.with_columns(
+            pl.when(pl.col("Nham_aa") == 0).then(True).otherwise(pl.col("WT")).alias("WT")
+        )
     # Nham_nt and Nmut_codons are meaningless after AA aggregation
     output_df = output_df.with_columns([
         pl.lit(None).cast(pl.Int32).alias("Nham_nt"),

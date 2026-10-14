@@ -171,6 +171,8 @@ def generate_report(
         "n_count_cols": len(count_cols),
         "sequence_type": getattr(config, "sequence_type_resolved", config.sequence_type),
         "wt_seq": getattr(config, "wt_nt_seq", "") or "",
+        # Extra WTs (multi-WT runs): (name, sequence) for the non-primary WTs
+        "extra_wts": [(w.name, w.seq) for w in getattr(config, "wildtypes", [])[1:]],
         "n_input_variants": n_input,
         "n_retained_variants": n_retained,
         "processing_counts_plot": processing_counts_plot,

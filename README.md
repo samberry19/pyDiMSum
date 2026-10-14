@@ -121,6 +121,13 @@ pydimsum \
 
 In the count table, column names must match the `sample_name` values in your design file (see [Variant count file](#variant-count-file)).
 
+**Multiple wildtypes:** pass several comma-separated sequences (optionally named) and each variant is first assigned to its nearest WT, then its mutations are called relative to that WT:
+```bash
+  --wildtype_sequence ATGcccGCT,ATGcccGCTAAA --wildtype_names alpha,beta
+  --permitted_sequences NNNNNN,NNNNNNNNN     # optional, one entry per WT
+```
+WTs may differ in length and constant-region layout. The first WT is the primary: fitness is centred on it (`WT == True`), and the other WTs get their own fitness on the same scale. Variants equidistant from two same-length WTs are rejected as ambiguous. Singles/doubles/MaveDB outputs gain a `WT_id` column, and `fitness_wildtype.txt` lists every WT.
+
 **Useful options for this mode:**
 ```bash
   --fitness_min_input_count_all 10   # discard variants with < 10 input reads in all replicates

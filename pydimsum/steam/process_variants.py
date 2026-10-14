@@ -5,6 +5,7 @@ Processes the wide variant count table to:
   - Remove internal constant regions
   - Calculate Nham_nt, Nham_aa, Nmut_codons
   - Translate nt → aa sequences
+  - Assign each variant to its nearest WT (when several WTs are given)
   - Identify WT sequence and flag STOP codons
   - Filter out forbidden, too-many-substitution, and mixed-substitution variants
   - Compute the ``merge_seq`` column
@@ -22,12 +23,12 @@ Mirrors:
 from __future__ import annotations
 
 import logging
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 import numpy as np
 import polars as pl
 
-from pydimsum.config import RunConfig
+from pydimsum.config import RunConfig, WTEntry
 from pydimsum.steam.sequences import (
     constant_region_matches_wt,
     decode_row,
@@ -64,6 +65,10 @@ class ProcessedVariants:
     # Mutation count statistics (dict of sample→count)
     stats: dict[str, dict]
 
+    wt_refs: dict[str, tuple[str, str]] = field(default_factory=dict)
+    """WT name -> (variable-position nt sequence lower-case, aa sequence ('' if
+    noncoding)).  Used downstream for mutation calling per WT."""
+
 
 # ---------------------------------------------------------------------------
 # Public API
@@ -83,11 +88,9 @@ def process_variants(
         Validated pipeline configuration.
     """
     count_cols = [c for c in df.columns if c.startswith("count_e")]
-    wt_seq = config.wt_nt_seq                # full sequence, lower-case
-    wt_coded = config.wildtype_sequence      # case-coded (upper=variable)
-    has_const = config.has_constant_region
+    wildtypes = config.wildtypes             # primary WT first
+    multi = len(wildtypes) > 1
     seq_type = config.sequence_type_resolved
-    permitted_seqs = config.permitted_sequences  # IUPAC, variable pos only
 
     # ------------------------------------------------------------------ #
     # 1. Reverse complement (optional)                                    #
@@ -112,9 +115,9 @@ def process_variants(
     # ------------------------------------------------------------------ #
     # 3. Mark indels and split                                            #
     # ------------------------------------------------------------------ #
-    wt_len = len(wt_seq)
+    wt_lengths = sorted({len(wt.seq) for wt in wildtypes})
     df = df.with_columns(
-        (pl.col("nt_seq").str.len_chars() != wt_len).alias("indel")
+        (~pl.col("nt_seq").str.len_chars().is_in(wt_lengths)).alias("indel")
     )
 
     indel_lengths_cfg = config._indel_lengths  # None=none, []=all, [int...]=specific
@@ -143,197 +146,57 @@ def process_variants(
             "Check wildtypeSequence and indels parameters."
         )
 
-    # ------------------------------------------------------------------ #
-    # 4. Vectorized nt operations on non-indel variants                   #
-    # ------------------------------------------------------------------ #
-    subst_mask = ~df["indel"]
-    subst_df = df.filter(subst_mask)
-    indel_retained_df = df.filter(~subst_mask)
-
-    nt_seqs = subst_df["nt_seq"].to_list()
-    if nt_seqs:
-        mat = encode(nt_seqs)                        # (n, L) uint8, lower-case
-        wt_arr = np.frombuffer(wt_seq.encode("ascii"), dtype=np.uint8)
-        nham_nt = hamming(mat, wt_arr)               # (n,) int32
-    else:
-        mat = np.empty((0, wt_len), dtype=np.uint8)
-        nham_nt = np.empty(0, dtype=np.int32)
-
-    # ---- Translate nt → aa ----
-    aa_seqs = translate_sequences_fast(nt_seqs)
-
-    # ---- WT aa sequence ----
-    wt_aa = translate_sequences_fast([wt_seq])[0]
-    wt_aa_arr = np.frombuffer(wt_aa.encode("ascii"), dtype=np.uint8)
-
-    aa_mat = encode(aa_seqs)                         # (n, n_aa) uint8
-    nham_aa = hamming(aa_mat, wt_aa_arr) if len(aa_seqs) else np.empty(0, np.int32)
-
-    # ---- Identify WT ----
-    wt_flags = np.array([s == wt_seq for s in nt_seqs], dtype=bool)
-
-    if not wt_flags.any():
-        logger.warning("WT sequence not found in variant table.")
-
-    # ---- STOP codon detection ----
-    wt_has_term_stop = wt_aa.endswith("*")
-    if len(aa_seqs):
-        stop_flags, readthrough_flags = detect_stop(aa_mat, wt_has_term_stop)
-    else:
-        stop_flags = np.empty(0, dtype=bool)
-        readthrough_flags = np.empty(0, dtype=bool)
-
-    # ---- Assemble subst_df with annotations ----
-    subst_df = subst_df.with_columns([
-        pl.Series("aa_seq", aa_seqs, dtype=pl.Utf8),
-        pl.Series("Nham_nt", nham_nt, dtype=pl.Int32),
-        pl.Series("Nham_aa", nham_aa, dtype=pl.Int32),
-        pl.Series("WT", wt_flags, dtype=pl.Boolean),
-        pl.Series("STOP", stop_flags.tolist(), dtype=pl.Boolean),
-        pl.Series("STOP_readthrough", readthrough_flags.tolist(), dtype=pl.Boolean),
-    ])
+    subst_all = df.filter(~df["indel"])
+    indel_retained_df = df.filter(df["indel"])
 
     # ------------------------------------------------------------------ #
-    # 5. Constant-region filtering                                        #
+    # 3b. Assign each substitution variant to its nearest WT              #
     # ------------------------------------------------------------------ #
     rejected_parts: list[pl.DataFrame] = []
-
-    if has_const:
-        # Mask: True = WT constant region (sequence passes)
-        const_ok = constant_region_matches_wt(mat, wt_coded)
-        const_rejected_df = subst_df.filter(~pl.Series(const_ok.tolist()))
-        const_rejected_df = const_rejected_df.with_columns(
-            pl.lit(False).alias("constant_region")
-        )
-        rejected_parts.append(const_rejected_df)
-
-        subst_df = subst_df.filter(pl.Series(const_ok.tolist()))
-        # Recompute nt_seq (variable positions only) after stripping const
-        vmask = variable_position_mask(wt_coded)
-        if len(subst_df):
-            # Re-encode filtered subset
-            nt_seqs_ok = subst_df["nt_seq"].to_list()
-            mat_ok = encode(nt_seqs_ok)
-            mat_var = strip_constant_regions(mat_ok, vmask)
-            wt_mat_var = strip_constant_regions(
-                np.frombuffer(wt_seq.encode("ascii"), dtype=np.uint8).reshape(1, -1),
-                vmask,
-            )[0]
-            # New nt_seq (variable only)
-            new_nt_seqs = [decode_row(mat_var[i]) for i in range(len(mat_var))]
-            # Recompute WT aa from variable positions before translating variants
-            wt_var_aa = translate_sequences_fast([decode_row(wt_mat_var)])[0]
-            wt_aa_arr = np.frombuffer(wt_var_aa.encode("ascii"), dtype=np.uint8)
-            wt_has_term_stop = wt_var_aa.endswith("*")
-            # Retranslate
-            new_aa_seqs = translate_sequences_fast(new_nt_seqs)
-            new_aa_mat = encode(new_aa_seqs) if new_aa_seqs else np.empty((0, len(wt_aa_arr)), dtype=np.uint8)
-            new_nham_nt = hamming(mat_var, wt_mat_var)
-            new_nham_aa = hamming(new_aa_mat, wt_aa_arr) if len(new_aa_seqs) else np.empty(0, np.int32)
-            new_stop, new_rt = detect_stop(new_aa_mat, wt_has_term_stop) if len(new_aa_seqs) else (
-                np.empty(0, dtype=bool), np.empty(0, dtype=bool)
+    if multi:
+        subst_all, ambiguous_df = _assign_wildtype(subst_all, wildtypes)
+        if len(ambiguous_df):
+            logger.warning(
+                "%d variants are equidistant from two or more WTs and were rejected",
+                len(ambiguous_df),
             )
-            new_wt = np.array([s == decode_row(wt_mat_var) for s in new_nt_seqs], dtype=bool)
-
-            subst_df = subst_df.with_columns([
-                pl.Series("nt_seq", new_nt_seqs, dtype=pl.Utf8),
-                pl.Series("aa_seq", new_aa_seqs, dtype=pl.Utf8),
-                pl.Series("Nham_nt", new_nham_nt, dtype=pl.Int32),
-                pl.Series("Nham_aa", new_nham_aa, dtype=pl.Int32),
-                pl.Series("WT", new_wt, dtype=pl.Boolean),
-                pl.Series("STOP", new_stop.tolist(), dtype=pl.Boolean),
-                pl.Series("STOP_readthrough", new_rt.tolist(), dtype=pl.Boolean),
-            ])
-            # Update mat and wt for subsequent steps
-            mat = mat_var
-            wt_arr = wt_mat_var
-    else:
-        subst_df = subst_df.with_columns(pl.lit(True).alias("constant_region"))
+            rejected_parts.append(ambiguous_df)
+        for wt in wildtypes:
+            n = int((subst_all["WT_id"] == wt.name).sum()) if len(subst_all) else 0
+            logger.info("WT %s: %d variants assigned", wt.name, n)
 
     # ------------------------------------------------------------------ #
-    # 6. Permitted mutation filtering                                     #
+    # 4-8. Per-WT processing                                              #
     # ------------------------------------------------------------------ #
-    if len(subst_df):
-        nt_seqs_cur = subst_df["nt_seq"].to_list()
-        mat_cur = encode(nt_seqs_cur)
-        perm_ok = permitted_mask(mat_cur, permitted_seqs, wt_coded)
-        perm_rejected = subst_df.filter(~pl.Series(perm_ok.tolist()))
-        perm_rejected = perm_rejected.with_columns(pl.lit(False).alias("permitted"))
-        rejected_parts.append(perm_rejected)
-        subst_df = subst_df.filter(pl.Series(perm_ok.tolist()))
-        mat_cur = mat_cur[perm_ok]
-
-    if len(subst_df) == 0:
-        raise RuntimeError(
-            "No variants remaining after permitted-mutations filtering."
-        )
-
-    # ------------------------------------------------------------------ #
-    # 7. Too-many-substitutions filter                                    #
-    # ------------------------------------------------------------------ #
-    max_subs = config.max_substitutions
-    if len(subst_df):
-        if seq_type == "coding":
-            too_many = subst_df["Nham_aa"].fill_null(0) > max_subs
+    group_dfs: list[pl.DataFrame] = []
+    wt_refs: dict[str, tuple[str, str]] = {}
+    for i, wt in enumerate(wildtypes):
+        is_primary = i == 0
+        if multi:
+            group = subst_all.filter(pl.col("WT_id") == wt.name)
         else:
-            too_many = subst_df["Nham_nt"].fill_null(0) > max_subs
-        tmsub_rejected = subst_df.filter(too_many).with_columns(
-            pl.lit(True).alias("too_many_substitutions")
+            group = subst_all
+        wt_var = wt.variable_seq.lower()
+        wt_refs[wt.name] = (
+            wt_var,
+            translate_sequences_fast([wt_var])[0] if seq_type == "coding" else "",
         )
-        rejected_parts.append(tmsub_rejected)
-        subst_df = subst_df.filter(~too_many)
-        if len(subst_df):
-            mat_cur = encode(subst_df["nt_seq"].to_list())
-
-    if len(subst_df) == 0:
-        raise RuntimeError(
-            "No variants remaining after too-many-substitutions filtering."
+        if len(group) == 0:
+            if is_primary:
+                raise RuntimeError(
+                    "No variants assigned to the primary WT. "
+                    "Check wildtypeSequence is correct."
+                )
+            logger.warning("No variants assigned to WT %s; skipping", wt.name)
+            continue
+        group, group_rejected = _process_wt_group(
+            group, wt, config, count_cols, is_primary, multi
         )
+        rejected_parts.extend(group_rejected)
+        if len(group):
+            group_dfs.append(group)
 
-    # ------------------------------------------------------------------ #
-    # 8. Nmut_codons + mixed-substitutions filter                         #
-    # ------------------------------------------------------------------ #
-    _check_variants(subst_df, count_cols)
-
-    if len(subst_df):
-        nt_seqs_cur = subst_df["nt_seq"].to_list()
-        mat_cur = encode(nt_seqs_cur)
-        wt_row = np.frombuffer(
-            subst_df.filter(pl.col("WT"))["nt_seq"].to_list()[0].encode("ascii"),
-            dtype=np.uint8,
-        )
-
-        if seq_type == "coding" and len(wt_row) % 3 == 0:
-            nmut_c = n_mut_codons(mat_cur, wt_row)
-        else:
-            nmut_c = np.zeros(len(subst_df), dtype=np.int32)
-
-        subst_df = subst_df.with_columns(
-            pl.Series("Nmut_codons", nmut_c, dtype=pl.Int32)
-        )
-
-        # Mixed substitutions: codons_with_mutations != Nham_aa AND Nham_aa != 0
-        if seq_type == "coding" and not config.mixed_substitutions:
-            nham_aa_arr = np.array(subst_df["Nham_aa"].fill_null(0).to_list(), dtype=np.int32)
-            mixed = (nmut_c - nham_aa_arr != 0) & (nham_aa_arr != 0)
-            mixed_rejected = subst_df.filter(pl.Series(mixed.tolist())).with_columns(
-                pl.lit(True).alias("mixed_substitutions")
-            )
-            rejected_parts.append(mixed_rejected)
-            subst_df = subst_df.filter(~pl.Series(mixed.tolist()))
-        else:
-            subst_df = subst_df.with_columns(
-                pl.lit(False).alias("mixed_substitutions")
-            )
-    else:
-        subst_df = subst_df.with_columns(
-            pl.lit(pl.Series([], dtype=pl.Int32)).alias("Nmut_codons")
-        )
-
-    if len(subst_df) == 0:
-        raise RuntimeError(
-            "No variants remaining after mixed-substitutions filtering."
-        )
+    subst_df = pl.concat(group_dfs, how="diagonal_relaxed")
 
     # ------------------------------------------------------------------ #
     # 9. Set merge_seq and error_model columns                            #
@@ -406,7 +269,279 @@ def process_variants(
         indel=indel_df,
         rejected=rejected_df,
         stats=stats,
+        wt_refs=wt_refs,
     )
+
+
+# ---------------------------------------------------------------------------
+# Per-WT processing (steps 4-8)
+# ---------------------------------------------------------------------------
+
+def _process_wt_group(
+    subst_df: pl.DataFrame,
+    wt: WTEntry,
+    config: RunConfig,
+    count_cols: list[str],
+    is_primary: bool,
+    multi: bool,
+) -> tuple[pl.DataFrame, list[pl.DataFrame]]:
+    """Annotate and filter the substitution variants assigned to one WT.
+
+    Raises for the primary WT if nothing remains after a filter; a secondary
+    WT that is exhausted returns an empty frame instead.
+    """
+    wt_seq = wt.seq                          # full sequence, lower-case
+    wt_coded = wt.coded_seq                  # case-coded (upper=variable)
+    has_const = wt.has_constant_region
+    seq_type = config.sequence_type_resolved
+    permitted_seqs = wt.permitted            # IUPAC, variable pos only
+    wt_len = len(wt_seq)
+    rejected_parts: list[pl.DataFrame] = []
+
+    def _exhausted(msg: str) -> None:
+        if is_primary:
+            raise RuntimeError(msg)
+        logger.warning("WT %s: %s", wt.name, msg)
+
+    if multi:
+        subst_df = subst_df.with_columns(pl.lit(wt.name).alias("WT_id"))
+
+    nt_seqs = subst_df["nt_seq"].to_list()
+    if nt_seqs:
+        mat = encode(nt_seqs)                        # (n, L) uint8, lower-case
+        wt_arr = np.frombuffer(wt_seq.encode("ascii"), dtype=np.uint8)
+        nham_nt = hamming(mat, wt_arr)               # (n,) int32
+    else:
+        mat = np.empty((0, wt_len), dtype=np.uint8)
+        nham_nt = np.empty(0, dtype=np.int32)
+
+    # ---- Translate nt → aa ----
+    aa_seqs = translate_sequences_fast(nt_seqs)
+
+    # ---- WT aa sequence ----
+    wt_aa = translate_sequences_fast([wt_seq])[0]
+    wt_aa_arr = np.frombuffer(wt_aa.encode("ascii"), dtype=np.uint8)
+
+    aa_mat = encode(aa_seqs)                         # (n, n_aa) uint8
+    nham_aa = hamming(aa_mat, wt_aa_arr) if len(aa_seqs) else np.empty(0, np.int32)
+
+    # ---- Identify WT ----
+    wt_flags = np.array([s == wt_seq for s in nt_seqs], dtype=bool)
+
+    if not wt_flags.any():
+        logger.warning("WT sequence %s not found in variant table.", wt.name)
+
+    # ---- STOP codon detection ----
+    wt_has_term_stop = wt_aa.endswith("*")
+    if len(aa_seqs):
+        stop_flags, readthrough_flags = detect_stop(aa_mat, wt_has_term_stop)
+    else:
+        stop_flags = np.empty(0, dtype=bool)
+        readthrough_flags = np.empty(0, dtype=bool)
+
+    # ---- Assemble subst_df with annotations ----
+    subst_df = subst_df.with_columns([
+        pl.Series("aa_seq", aa_seqs, dtype=pl.Utf8),
+        pl.Series("Nham_nt", nham_nt, dtype=pl.Int32),
+        pl.Series("Nham_aa", nham_aa, dtype=pl.Int32),
+        pl.Series("WT", wt_flags, dtype=pl.Boolean),
+        pl.Series("STOP", stop_flags.tolist(), dtype=pl.Boolean),
+        pl.Series("STOP_readthrough", readthrough_flags.tolist(), dtype=pl.Boolean),
+    ])
+
+    # ------------------------------------------------------------------ #
+    # 5. Constant-region filtering                                        #
+    # ------------------------------------------------------------------ #
+    if has_const:
+        # Mask: True = WT constant region (sequence passes)
+        const_ok = constant_region_matches_wt(mat, wt_coded)
+        const_rejected_df = subst_df.filter(~pl.Series(const_ok.tolist()))
+        const_rejected_df = const_rejected_df.with_columns(
+            pl.lit(False).alias("constant_region")
+        )
+        rejected_parts.append(const_rejected_df)
+
+        subst_df = subst_df.filter(pl.Series(const_ok.tolist()))
+        # Recompute nt_seq (variable positions only) after stripping const
+        vmask = variable_position_mask(wt_coded)
+        if len(subst_df):
+            # Re-encode filtered subset
+            nt_seqs_ok = subst_df["nt_seq"].to_list()
+            mat_ok = encode(nt_seqs_ok)
+            mat_var = strip_constant_regions(mat_ok, vmask)
+            wt_mat_var = strip_constant_regions(
+                np.frombuffer(wt_seq.encode("ascii"), dtype=np.uint8).reshape(1, -1),
+                vmask,
+            )[0]
+            # New nt_seq (variable only)
+            new_nt_seqs = [decode_row(mat_var[i]) for i in range(len(mat_var))]
+            # Recompute WT aa from variable positions before translating variants
+            wt_var_aa = translate_sequences_fast([decode_row(wt_mat_var)])[0]
+            wt_aa_arr = np.frombuffer(wt_var_aa.encode("ascii"), dtype=np.uint8)
+            wt_has_term_stop = wt_var_aa.endswith("*")
+            # Retranslate
+            new_aa_seqs = translate_sequences_fast(new_nt_seqs)
+            new_aa_mat = encode(new_aa_seqs) if new_aa_seqs else np.empty((0, len(wt_aa_arr)), dtype=np.uint8)
+            new_nham_nt = hamming(mat_var, wt_mat_var)
+            new_nham_aa = hamming(new_aa_mat, wt_aa_arr) if len(new_aa_seqs) else np.empty(0, np.int32)
+            new_stop, new_rt = detect_stop(new_aa_mat, wt_has_term_stop) if len(new_aa_seqs) else (
+                np.empty(0, dtype=bool), np.empty(0, dtype=bool)
+            )
+            new_wt = np.array([s == decode_row(wt_mat_var) for s in new_nt_seqs], dtype=bool)
+
+            subst_df = subst_df.with_columns([
+                pl.Series("nt_seq", new_nt_seqs, dtype=pl.Utf8),
+                pl.Series("aa_seq", new_aa_seqs, dtype=pl.Utf8),
+                pl.Series("Nham_nt", new_nham_nt, dtype=pl.Int32),
+                pl.Series("Nham_aa", new_nham_aa, dtype=pl.Int32),
+                pl.Series("WT", new_wt, dtype=pl.Boolean),
+                pl.Series("STOP", new_stop.tolist(), dtype=pl.Boolean),
+                pl.Series("STOP_readthrough", new_rt.tolist(), dtype=pl.Boolean),
+            ])
+            # Update mat and wt for subsequent steps
+            mat = mat_var
+            wt_arr = wt_mat_var
+    else:
+        subst_df = subst_df.with_columns(pl.lit(True).alias("constant_region"))
+
+    # ------------------------------------------------------------------ #
+    # 6. Permitted mutation filtering                                     #
+    # ------------------------------------------------------------------ #
+    if len(subst_df):
+        nt_seqs_cur = subst_df["nt_seq"].to_list()
+        mat_cur = encode(nt_seqs_cur)
+        perm_ok = permitted_mask(mat_cur, permitted_seqs, wt_coded)
+        perm_rejected = subst_df.filter(~pl.Series(perm_ok.tolist()))
+        perm_rejected = perm_rejected.with_columns(pl.lit(False).alias("permitted"))
+        rejected_parts.append(perm_rejected)
+        subst_df = subst_df.filter(pl.Series(perm_ok.tolist()))
+        mat_cur = mat_cur[perm_ok]
+
+    if len(subst_df) == 0:
+        _exhausted("No variants remaining after permitted-mutations filtering.")
+        return subst_df, rejected_parts
+
+    # ------------------------------------------------------------------ #
+    # 7. Too-many-substitutions filter                                    #
+    # ------------------------------------------------------------------ #
+    max_subs = config.max_substitutions
+    if len(subst_df):
+        if seq_type == "coding":
+            too_many = subst_df["Nham_aa"].fill_null(0) > max_subs
+        else:
+            too_many = subst_df["Nham_nt"].fill_null(0) > max_subs
+        tmsub_rejected = subst_df.filter(too_many).with_columns(
+            pl.lit(True).alias("too_many_substitutions")
+        )
+        rejected_parts.append(tmsub_rejected)
+        subst_df = subst_df.filter(~too_many)
+        if len(subst_df):
+            mat_cur = encode(subst_df["nt_seq"].to_list())
+
+    if len(subst_df) == 0:
+        _exhausted("No variants remaining after too-many-substitutions filtering.")
+        return subst_df, rejected_parts
+
+    # ------------------------------------------------------------------ #
+    # 8. Nmut_codons + mixed-substitutions filter                         #
+    # ------------------------------------------------------------------ #
+    if is_primary:
+        _check_variants(subst_df, count_cols)
+
+    if len(subst_df):
+        nt_seqs_cur = subst_df["nt_seq"].to_list()
+        mat_cur = encode(nt_seqs_cur)
+        wt_row = np.frombuffer(wt.variable_seq.lower().encode("ascii"), dtype=np.uint8)
+
+        if seq_type == "coding" and len(wt_row) % 3 == 0:
+            nmut_c = n_mut_codons(mat_cur, wt_row)
+        else:
+            nmut_c = np.zeros(len(subst_df), dtype=np.int32)
+
+        subst_df = subst_df.with_columns(
+            pl.Series("Nmut_codons", nmut_c, dtype=pl.Int32)
+        )
+
+        # Mixed substitutions: codons_with_mutations != Nham_aa AND Nham_aa != 0
+        if seq_type == "coding" and not config.mixed_substitutions:
+            nham_aa_arr = np.array(subst_df["Nham_aa"].fill_null(0).to_list(), dtype=np.int32)
+            mixed = (nmut_c - nham_aa_arr != 0) & (nham_aa_arr != 0)
+            mixed_rejected = subst_df.filter(pl.Series(mixed.tolist())).with_columns(
+                pl.lit(True).alias("mixed_substitutions")
+            )
+            rejected_parts.append(mixed_rejected)
+            subst_df = subst_df.filter(~pl.Series(mixed.tolist()))
+        else:
+            subst_df = subst_df.with_columns(
+                pl.lit(False).alias("mixed_substitutions")
+            )
+    else:
+        subst_df = subst_df.with_columns(
+            pl.lit(pl.Series([], dtype=pl.Int32)).alias("Nmut_codons")
+        )
+
+    if len(subst_df) == 0:
+        _exhausted("No variants remaining after mixed-substitutions filtering.")
+        return subst_df, rejected_parts
+
+    if multi:
+        subst_df = subst_df.with_columns(pl.col("WT").alias("WT_ref"))
+        if not is_primary:
+            subst_df = subst_df.with_columns(pl.lit(False).alias("WT"))
+    return subst_df, rejected_parts
+
+
+# ---------------------------------------------------------------------------
+# WT assignment (multiple WTs)
+# ---------------------------------------------------------------------------
+
+def _assign_wildtype(
+    df: pl.DataFrame,
+    wildtypes: list[WTEntry],
+) -> tuple[pl.DataFrame, pl.DataFrame]:
+    """Assign each variant to the nearest WT (by nt Hamming distance).
+
+    Only WTs of the same length as the variant are candidates.  Variants that
+    are equidistant from two or more candidate WTs are returned separately
+    (flagged ``ambiguous_wt``) and are not assigned.
+
+    Returns (assigned_df with ``WT_id`` column, ambiguous_df).
+    """
+    by_len: dict[int, list[WTEntry]] = {}
+    for wt in wildtypes:
+        by_len.setdefault(len(wt.seq), []).append(wt)
+
+    lengths = df["nt_seq"].str.len_chars()
+    assigned: list[pl.DataFrame] = []
+    ambiguous: list[pl.DataFrame] = []
+    for length, wts in by_len.items():
+        sub = df.filter(lengths == length)
+        if len(sub) == 0:
+            continue
+        if len(wts) == 1:
+            assigned.append(sub.with_columns(pl.lit(wts[0].name).alias("WT_id")))
+            continue
+        mat = encode(sub["nt_seq"].to_list())
+        dists = np.stack([hamming(mat, wt.seq) for wt in wts], axis=1)
+        dmin = dists.min(axis=1)
+        tie = (dists == dmin[:, None]).sum(axis=1) > 1
+        names = np.array([wt.name for wt in wts])[dists.argmin(axis=1)]
+        sub = sub.with_columns(pl.Series("WT_id", names.tolist(), dtype=pl.Utf8))
+        tie_mask = pl.Series(tie.tolist(), dtype=pl.Boolean)
+        assigned.append(sub.filter(~tie_mask))
+        ambiguous.append(
+            sub.filter(tie_mask).with_columns(pl.lit(True).alias("ambiguous_wt"))
+        )
+
+    if assigned:
+        assigned_df = pl.concat(assigned, how="diagonal_relaxed")
+    else:
+        assigned_df = df.head(0).with_columns(pl.lit(None).cast(pl.Utf8).alias("WT_id"))
+    if ambiguous:
+        ambiguous_df = pl.concat(ambiguous, how="diagonal_relaxed")
+    else:
+        ambiguous_df = df.head(0)
+    return assigned_df, ambiguous_df
 
 
 # ---------------------------------------------------------------------------
@@ -480,6 +615,7 @@ def _compute_stats(
     stats["nuc_frbdn_dict"] = _filtered_sums(rejected_df, "permitted", False)
     stats["nuc_tmsub_dict"] = _filtered_sums(rejected_df, "too_many_substitutions", True)
     stats["nuc_mxsub_dict"] = _filtered_sums(rejected_df, "mixed_substitutions", True)
+    stats["nuc_ambig_dict"] = _filtered_sums(rejected_df, "ambiguous_wt", True)
 
     # Substitution distributions in retained variants
     if seq_type == "coding" and "Nham_aa" in retained_df.columns:
