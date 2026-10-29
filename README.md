@@ -233,21 +233,29 @@ pydimsum \
 
 ### 4. Growth-rate assay
 
-When fitness is measured in a growth competition assay (e.g. yeast doubling competition), you can provide cell density and selection time to infer growth rates directly, rather than using sequencing time points.
-
-Add `cell_density`, `selection_time`, and (optionally) `generations` columns to your experiment design file:
+When fitness is measured in a growth competition assay (e.g. yeast doubling competition), two optional, independent features use extra experiment design columns. Both are detected automatically from the columns — no extra flag is required — and either or both can be used.
 
 ```
-sample_name  experiment_replicate  selection_id  ...  cell_density  selection_time
-input1       1                     0             ...  0.05          
-output1A     1                     1             ...  2.10          24.0
+sample_name  experiment_replicate  selection_id  ...  generations  cell_density  selection_time
+input1       1                     0             ...               0.05
+output1A     1                     1             ...  5.4          2.10          24.0
 ```
 
-- `cell_density`: OD or equivalent at the time of sampling (all rows)
-- `selection_time`: hours of selection (output rows only)
-- `generations`: if provided instead of cell_density/selection_time, fitness is directly divided by generations rather than inferred
+**Normalisation by generations** (requires `generations` on every output row). Each replicate's fitness and sigma are rescaled to log2 fitness per generation:
 
-When all output rows have `cell_density` and `selection_time`, pyDiMSum automatically infers growth rates and uses them to normalise fitness. No extra flag is required — it detects the columns.
+```
+fitnessE = log2(exp(fitnessE / mean_generationsE))  =  fitnessE / (mean_generationsE · ln 2)
+```
+
+where `mean_generationsE` is the mean over that replicate's output samples. This is a multiplicative rescaling with no offset: WT stays at 0, and each variant's fitness/sigma ratio does not change. It is applied per replicate before replicates are merged, so replicates that went through different numbers of doublings are put on a common scale before averaging. When every replicate has the same number of generations, it only changes the units of the merged values. pyDiMSum does not compute the number of generations from OD — you supply it (e.g. log2(OD_out / OD_in), corrected for any dilutions). In the enrichment pipeline, the same rescaling is applied to the enrichment scores.
+
+**Growth-rate inference** (requires `cell_density` on all rows and `selection_time` on every output row). For each replicate, pyDiMSum estimates an absolute growth rate for each variant, using OD as a stand-in for total cell number:
+
+```
+growthrateE = ln( (count_out/Σcount_out · OD_out) / (count_in/Σcount_in · OD_in) ) / selection_time
+```
+
+It then fits a line, `growthrateE ~ fitnessE`, over error-model variants and uses that line to convert every variant's fitness and sigma into a growth rate (in units per `selection_time` unit). The replicates are merged by inverse-variance weighting, and a final fit against the merged fitness gives `growthrate` and `growthrate_sigma`. **Fitness values are not changed** — this is a linear rescaling of fitness into absolute units, added as extra columns (`growthrate{E}`, `growthrate{E}_sigma`, `growthrate`, `growthrate_sigma`). These columns appear in the `all_variants` table of the fitness bundle and in `fitness_wildtype.txt`, not in the singles/doubles tables.
 
 ---
 
@@ -348,9 +356,9 @@ Tab-separated plain text. One row per FASTQ file (or pair of FASTQ files). Downl
 
 | Column | Rows | Description |
 |--------|------|-------------|
-| `generations` | output | Number of cell generations. If provided, fitness is divided by generations. |
-| `cell_density` | all | OD or cell count at sampling time, used to infer growth rate. |
-| `selection_time` | output | Hours of selection, used together with `cell_density`. |
+| `generations` | output | Number of cell generations. If given for all output rows, per-replicate fitness and sigma are rescaled to log2 fitness per generation before merging. Must match across technical replicates. |
+| `cell_density` | all | OD or cell count at sampling time. Used together with `selection_time` to add growth-rate columns (fitness itself is unchanged). |
+| `selection_time` | output | Duration of selection (e.g. hours), used together with `cell_density`. Sets the time unit of the growth rates. |
 
 **Per-sample cutadapt overrides:** Any cutadapt flag can be specified as a column name (e.g. `cutadapt5First`, `cutadaptMinLength`). Column values override the global CLI flag for that sample.
 
